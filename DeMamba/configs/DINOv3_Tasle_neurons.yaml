@@ -1,0 +1,32 @@
+# DINOv3 ViT-B/16 encoder replacement.  The selected patch features remain
+# [B, T, 196, 768], so no adapter is inserted before the original DeMamba head.
+model: 'DINOv3_NeuronDeMamba_4'
+tuning_mode: 'lp'
+task: 'many2many'
+
+save_dir: '../MSLoc_data/DeMamba/results/dinov3_neurons_4'
+neuron_indices_path: '../MSLoc_data/DeMamba/neuron_probe_dinov3/dinov3_neuron_indices.json'
+dinov3_backend: 'huggingface'
+dinov3_hf_model_path: '../MSLoc_data/DeMamba/pretrained_weights/dinov3_hf'
+# Optional fallback if you later receive Meta's official .pth checkpoint.
+dinov3_repo_path: '../MSLoc_data/DeMamba/pretrained_weights/dinov3'
+dinov3_weights_path: '../MSLoc_data/DeMamba/pretrained_weights/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth'
+dinov3_model_name: 'dinov3_vitb16'
+
+max_epoch: 10
+bath_per_epoch: 1000
+train_batch_size: 32
+val_batch_size: 32
+num_workers: 32
+lr: 0.000001
+
+train_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json'
+test_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json'
+dataset_base_path: '/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/video_frames'
+window_length: 2.0
+frames_per_window: 8
+mode: 'four_class'
+transform_config: {
+  crop_youku: True,
+  normalization: 'dinov3_lvd'
+}

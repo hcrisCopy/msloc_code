@@ -1,0 +1,32 @@
+# Public Hugging Face DINOv2 ViT-B/14.  At 196x196, its 14x14 patch grid
+# gives exactly 196 patch tokens, each with width 768: [B, T, 196, 768].
+# Thus the original DeMamba head is used unchanged and no adapter is inserted.
+model: 'DINOv2_NeuronDeMamba_4'
+tuning_mode: 'sft'
+task: 'many2many'
+
+save_dir: '../MSLoc_data/DeMamba/results/dinov2_neurons_4'
+neuron_indices_path: '../MSLoc_data/DeMamba/neuron_probe_dinov2/dinov2_neuron_indices.json'
+dinov2_hf_model_path: '../MSLoc_data/DeMamba/pretrained_weights/dinov2_hf'
+
+max_epoch: 10
+bath_per_epoch: 1000
+train_batch_size: 32
+val_batch_size: 32
+num_workers: 32
+lr: 0.000001
+
+# train_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json'
+# test_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json'
+# dataset_base_path: '../MSLoc_data/DeMamba/video_frames'
+train_json_path: '/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/annos/train_all_1209.json'
+test_json_path: '/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/annos/test_all_1209_0119.json'
+dataset_base_path: '/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/video_frames'
+window_length: 2.0
+frames_per_window: 8
+mode: 'four_class'
+transform_config: {
+  crop_youku: True,
+  normalization: 'dinov2',
+  image_size: 196
+}
