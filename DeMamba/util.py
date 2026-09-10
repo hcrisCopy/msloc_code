@@ -11,6 +11,14 @@ import numpy as np
 from typing import List, Dict, Tuple, Any
 import warnings
 
+
+DINO_NEURON_MODELS = {"DINOv2_NeuronDeMamba_4", "DINOv3_NeuronDeMamba_4"}
+
+
+def uses_marginal_fake_score(model_name):
+    """Whether fake confidence is the sum of the three foreground classes."""
+    return model_name in DINO_NEURON_MODELS
+
 class TemporalSegmentationEvaluator:
     """Temporal-segmentation evaluator."""
     
@@ -685,7 +693,11 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
                 # Per-window prediction handled by mode.
                 if is_binary:
                     pred_score = logit[j,0].sigmoid().cpu().detach().numpy()
+                elif uses_marginal_fake_score(cfg.get('model')):
+                    pred_probs = torch.softmax(logit[j], dim=0)
+                    pred_score = pred_probs[1:].sum().cpu().detach().numpy()
                 else:
+                    # Preserve the original XCLIP four-class localization rule.
                     pred_probs = torch.softmax(logit[j], dim=0)
                     pred_score = (pred_probs[1:].max() > pred_probs[0]).float().cpu().detach().numpy()
 

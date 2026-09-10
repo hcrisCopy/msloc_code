@@ -24,8 +24,8 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from dataloader import normalization_params
-from util import build_model
+from dataloader import normalization_params, resize_interpolation
+from util import build_model, uses_marginal_fake_score
 
 
 VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -312,7 +312,7 @@ def load_model(cfg: dict, checkpoint_path: Path, device: torch.device, device_id
 
 
 def decode_window(cap: cv2.VideoCapture, start: float, end: float, count: int,
-                  image_size: int, normalisation: tuple) -> np.ndarray:
+                  image_size: int, normalisation: tuple, interpolation: int) -> np.ndarray:
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if not math.isfinite(fps) or fps <= 0 or frame_count <= 0:
@@ -334,7 +334,7 @@ def decode_window(cap: cv2.VideoCapture, start: float, end: float, count: int,
         else:
             previous = frame
         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(image, (image_size, image_size), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+        image = cv2.resize(image, (image_size, image_size), interpolation=interpolation).astype(np.float32) / 255.0
         output.append(np.transpose((image - mean) / std, (2, 0, 1)))
     return np.stack(output)
 
@@ -359,7 +359,7 @@ def merge_windows(windows: Sequence[dict]) -> list[dict]:
 
 def infer_video(model: torch.nn.Module, item: EvaluationItem, device: torch.device, frame_count: int,
                 image_size: int, window: float, stride: float, batch_size: int, normalisation: tuple,
-                progress: Callable[[int], None]) -> dict:
+                interpolation: int, marginal_fake_score: bool, progress: Callable[[int], None]) -> dict:
     cap = cv2.VideoCapture(str(item.path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open {item.path}")
@@ -369,16 +369,22 @@ def infer_video(model: torch.nn.Module, item: EvaluationItem, device: torch.devi
         for offset in range(0, len(all_intervals), batch_size):
             batch_intervals = all_intervals[offset:offset + batch_size]
             batch = np.stack([
-                decode_window(cap, a, b, frame_count, image_size, normalisation)
+                decode_window(cap, a, b, frame_count, image_size, normalisation, interpolation)
                 for a, b in batch_intervals
             ])
             tensor = torch.from_numpy(batch).to(device=device, dtype=torch.float32, non_blocking=True)
             with torch.inference_mode():
                 probabilities = torch.softmax(model(tensor), dim=1).detach().cpu().numpy()
             for (start, end), probability in zip(batch_intervals, probabilities):
-                score = float(np.max(probability[1:]))
+                if marginal_fake_score:
+                    score = float(np.sum(probability[1:]))
+                    foreground = score > 0.5
+                else:
+                    # Preserve the original XCLIP proposal score and decision rule.
+                    score = float(np.max(probability[1:]))
+                    foreground = score > float(probability[0])
                 windows.append({
-                    "start": start, "end": end, "foreground": score > float(probability[0]),
+                    "start": start, "end": end, "foreground": foreground,
                     "score": score, "predicted_class": int(np.argmax(probability)),
                     "probabilities": probability.tolist(),
                 })
@@ -698,6 +704,8 @@ def main() -> None:
     torch.cuda.set_device(args.device_ids[0]); device = torch.device(f"cuda:{args.device_ids[0]}")
     model = load_model(cfg, args.model_path, device, args.device_ids)
     normalisation = normalization_params(transform_config)
+    interpolation = resize_interpolation(transform_config)
+    marginal_fake_score = uses_marginal_fake_score(cfg.get("model"))
     print("[5/5] Running inference")
     results, failures = [], []
     with tqdm(total=sum(x.window_count for x in manifest), desc="Inference windows", unit="window", position=0) as window_bar:
@@ -706,7 +714,8 @@ def main() -> None:
                 windows_before = window_bar.n
                 try:
                     results.append(infer_video(model, item, device, frame_count, image_size, window, stride,
-                                               args.batch_size, normalisation, window_bar.update))
+                                               args.batch_size, normalisation, interpolation, marginal_fake_score,
+                                               window_bar.update))
                 except Exception as exc:
                     failures.append({"video_id": item.record.video_id, "generator": item.record.generator, "error": str(exc)})
                     tqdm.write(f"[warning] {item.record.video_id}: {exc}")

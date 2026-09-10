@@ -24,5 +24,8 @@ window_length: 2.0
 frames_per_window: 8
 mode: 'four_class'
 transform_config: {
-  crop_youku: True
+  crop_youku: True,
+  normalization: 'xclip',
+  image_size: 224,
+  interpolation: 'cubic'
 }

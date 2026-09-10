@@ -77,7 +77,7 @@ def read_image(frame_root, video_path, frame_number, frame_file, crop_youku):
     if crop_youku and "youku" in str(path).lower():
         height, width = image.shape[:2]
         image = image[:, int(width * .15):int(width * .85)] if width > height else image[int(height * .15):int(height * .85), :]
-    image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_CUBIC).astype(np.float32) / 255.0
+    image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
     return torch.from_numpy((image - IMAGENET_MEAN) / IMAGENET_STD).permute(2, 0, 1).contiguous()
 
 

@@ -271,6 +271,19 @@ def normalization_params(transform_config: Dict) -> Tuple[Tuple[float, float, fl
     raise ValueError(f"Unsupported normalization: {normalization!r}")
 
 
+def resize_interpolation(transform_config: Dict) -> int:
+    """Return the OpenCV interpolation selected by the experiment config."""
+    interpolation = str(transform_config.get("interpolation", "linear")).lower()
+    interpolation_map = {
+        "linear": cv2.INTER_LINEAR,
+        "cubic": cv2.INTER_CUBIC,
+        "bicubic": cv2.INTER_CUBIC,
+    }
+    if interpolation not in interpolation_map:
+        raise ValueError(f"Unsupported resize interpolation: {interpolation!r}")
+    return interpolation_map[interpolation]
+
+
 class VideoWindowDatasetTrain(Dataset):
     def __init__(self, windows: List[Dict], mode: str = "binary", transform_config: Dict = None):
         """
@@ -332,7 +345,11 @@ class VideoWindowDatasetTrain(Dataset):
         select_frame_nums = len(frame_paths)
         
         # Build augmentation pipeline.
-        aug_list = [albumentations.Resize(self.image_size, self.image_size)]
+        aug_list = [albumentations.Resize(
+            self.image_size,
+            self.image_size,
+            interpolation=resize_interpolation(self.transform_config),
+        )]
         
         # Train-time augmentations.
         if random.random() < 0.5:
@@ -355,8 +372,6 @@ class VideoWindowDatasetTrain(Dataset):
         
         # Read and preprocess frames.
         frames = []
-        valid_frames = 0
-        
         for frame_path in frame_paths:
             try:
                 if os.path.exists(frame_path):
@@ -370,19 +385,15 @@ class VideoWindowDatasetTrain(Dataset):
                     augmented = trans(image=image)
                     image = augmented["image"]
                     frames.append(image.transpose(2, 0, 1)[np.newaxis, :])
-                    valid_frames += 1
                 else:
                     # Missing frame -> zero padding.
-                    frames.append(np.zeros((3, self.image_size, self.image_size))[np.newaxis, :])
+                    frames.append(np.zeros((1, 3, self.image_size, self.image_size), dtype=np.float32))
             except Exception as e:
                 warnings.warn(f"Error loading frame {frame_path}: {e}")
-                frames.append(np.zeros((3, self.image_size, self.image_size))[np.newaxis, :])
-        
-        # Pad if fewer than the requested number of frames are available.
-        if valid_frames < select_frame_nums:
-            pad_num = select_frame_nums - valid_frames
-            for i in range(pad_num):
-                frames.append(np.zeros((3, self.image_size, self.image_size))[np.newaxis, :])
+                frames.append(np.zeros((1, 3, self.image_size, self.image_size), dtype=np.float32))
+
+        if len(frames) != select_frame_nums:
+            raise RuntimeError(f"Expected {select_frame_nums} frames, got {len(frames)}")
         
         # Build the label.
         label_onehot = [0] * self.num_classes
@@ -436,7 +447,11 @@ class VideoWindowDatasetTest(Dataset):
         select_frame_nums = len(frame_paths)
         
         # Build the augmentation pipeline (no random augmentations at test time).
-        aug_list = [albumentations.Resize(self.image_size, self.image_size)]
+        aug_list = [albumentations.Resize(
+            self.image_size,
+            self.image_size,
+            interpolation=resize_interpolation(self.transform_config),
+        )]
         
         norm_mean, norm_std = normalization_params(self.transform_config)
         aug_list.append(albumentations.Normalize(mean=norm_mean,
@@ -446,8 +461,6 @@ class VideoWindowDatasetTest(Dataset):
         
         # Read and preprocess frames.
         frames = []
-        valid_frames = 0
-        
         for frame_path in frame_paths:
             try:
                 if os.path.exists(frame_path):
@@ -461,19 +474,15 @@ class VideoWindowDatasetTest(Dataset):
                     augmented = trans(image=image)
                     image = augmented["image"]
                     frames.append(image.transpose(2, 0, 1)[np.newaxis, :])
-                    valid_frames += 1
                 else:
                     # Missing frame -> zero padding.
-                    frames.append(np.zeros((3, self.image_size, self.image_size))[np.newaxis, :])
+                    frames.append(np.zeros((1, 3, self.image_size, self.image_size), dtype=np.float32))
             except Exception as e:
                 warnings.warn(f"Error loading frame {frame_path}: {e}")
-                frames.append(np.zeros((3, self.image_size, self.image_size))[np.newaxis, :])
-        
-        # Pad if fewer than the requested number of frames are available.
-        if valid_frames < select_frame_nums:
-            pad_num = select_frame_nums - valid_frames
-            for i in range(pad_num):
-                frames.append(np.zeros((3, self.image_size, self.image_size))[np.newaxis, :])
+                frames.append(np.zeros((1, 3, self.image_size, self.image_size), dtype=np.float32))
+
+        if len(frames) != select_frame_nums:
+            raise RuntimeError(f"Expected {select_frame_nums} frames, got {len(frames)}")
         
         # Build the label.
         label_onehot = [0] * self.num_classes

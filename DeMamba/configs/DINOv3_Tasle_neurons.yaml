@@ -31,5 +31,7 @@ frames_per_window: 8
 mode: 'four_class'
 transform_config: {
   crop_youku: True,
-  normalization: 'dinov3_lvd'
+  normalization: 'dinov3_lvd',
+  image_size: 224,
+  interpolation: 'linear'
 }

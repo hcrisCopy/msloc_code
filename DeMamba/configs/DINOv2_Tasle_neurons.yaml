@@ -28,5 +28,6 @@ mode: 'four_class'
 transform_config: {
   crop_youku: True,
   normalization: 'dinov2',
-  image_size: 196
+  image_size: 196,
+  interpolation: 'cubic'
 }
