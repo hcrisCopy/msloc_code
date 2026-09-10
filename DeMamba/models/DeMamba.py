@@ -703,8 +703,10 @@ class DINOv3_NeuronDeMamba(nn.Module):
                     init.constant_(item.bias, 0)
 
     def train(self, mode=True):
+        """Train DINOv3 during SFT; keep it deterministic only after LP freezing."""
         super().train(mode)
-        self.encoder.eval()
+        if not any(parameter.requires_grad for parameter in self.encoder.parameters()):
+            self.encoder.eval()
         return self
 
     def _selected_patch_features(self, images, batch_size, num_frames):

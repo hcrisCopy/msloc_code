@@ -2,21 +2,22 @@
 
 所有命令均从项目根目录 `MSLoc_code` 执行
 
-## 1. 下载 DINOv2 权重
+## 1. DINOv2
+
+### 1.1 权重下载
 
 ```bash
 hf download facebook/dinov2-base \
   --local-dir ../MSLoc_data/DeMamba/pretrained_weights/dinov2_hf
 ```
 
-
-## 2. 正式神经元探测、训练与原论文测试集评测
+### 1.2 正式神经元探测、训练与原论文测试集评测
 
 ```bash
 bash DeMamba/run_dinov2_neuron_pipeline.sh
 ```
 
-## 3. DINOv2 评测新 benchmark：ActivityForensics
+### 1.3 评测新 benchmark：ActivityForensics
 
 下面的命令直接读取 ActivityForensics 原始视频，不需要预先抽帧。配置中的
 `dinov2_hf_model_path`、神经元索引路径和 checkpoint 路径与
@@ -49,7 +50,46 @@ python evaluate_proposal_quality.py \
   --domain-key tool_domain
 ```
 
-## 4. 原 XCLIP 评测新 benchmark：ActivityForensics
+## 2. DINOv3
+
+### 2.1 权重下载
+
+```bash
+hf download facebook/dinov3-vitb16-pretrain-lvd1689m --local-dir "../MSLoc_data/DeMamba/pretrained_weights/dinov3_hf"
+```
+
+### 2.2 神经元探测、SFT 训练与原论文测试集评测
+
+```bash
+bash DeMamba/run_dinov3_neuron_pipeline.sh
+```
+
+### 2.3 评测新 benchmark：ActivityForensics
+
+```bash
+python DeMamba/eval_activityforensics.py \
+  --config DeMamba/configs/DINOv3_Tasle_neurons.yaml \
+  --model-path ../MSLoc_data/DeMamba/results/dinov3_neurons_4/best_acc.pth \
+  --annotation-dir ../MSLoc_data/ActivityForensics \
+  --video-root ../MSLoc_data/ActivityForensics \
+  --output-dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics \
+  --device-ids 0 \
+  --batch-size 8 \
+  --clean
+```
+
+完成上述评测后，运行时序 proposal 质量评测：
+
+```bash
+python evaluate_proposal_quality.py \
+  --gt-file ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/predictions.json \
+  --infer-file ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/predictions.json \
+  --output-dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/proposal_quality \
+  --iou-thresholds 0.1,0.3,0.5,0.7 \
+  --domain-key tool_domain
+```
+
+## 3. 原 XCLIP 评测新 benchmark：ActivityForensics
 
 ```bash
 python DeMamba/eval_activityforensics.py \
@@ -74,7 +114,7 @@ python evaluate_proposal_quality.py \
   --domain-key tool_domain
 ```
 
-## 5. Baseline 评测新 benchmark：ActivityForensics
+## 4. Baseline 评测新 benchmark：ActivityForensics
 
 Baseline 使用 `DeMamba/configs/XCLIP_Tasle.yaml`，checkpoint 使用
 `../MSLoc_data/DeMamba/results/all_Class_4/best_acc.pth`。
