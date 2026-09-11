@@ -286,6 +286,8 @@ def main():
     parser.add_argument('--save-progress', action='store_true', help='Save batch-level evaluation progress for later --resume')
     parser.add_argument('--cache-data', action='store_true', help='Cache constructed video windows for reuse')
     parser.add_argument('--dataset-base-path', default=None, help='Optional override for cfg.dataset_base_path')
+    parser.add_argument('--neuron-indices-path', default=None,
+                        help='Optional override for cfg.neuron_indices_path')
     
     args = parser.parse_args()
     args.device_ids = parse_device_ids(args.device_ids)
@@ -325,6 +327,10 @@ def main():
         cfg['num_workers'] = args.num_workers
     if args.dataset_base_path is not None:
         cfg['dataset_base_path'] = args.dataset_base_path
+    if args.neuron_indices_path is not None:
+        if not os.path.isfile(args.neuron_indices_path):
+            raise FileNotFoundError(f'Neuron selector not found: {args.neuron_indices_path}')
+        cfg['neuron_indices_path'] = args.neuron_indices_path
     cfg['evaluation_only'] = bool(args.anno_file or args.max_eval_videos is not None or args.resume or args.save_progress)
 
     output_root = Path(args.output_dir).resolve()

@@ -20,7 +20,7 @@ source Trace/scripts/setup_opd_grpo_env.sh
 ## 1. 使用已有 DeMamba checkpoint 生成训练集 proposal
 
 ~~~bash
-python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --device-ids 0 --val-batch-size 16 --save-progress --cache-data --clean
+python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --device-ids 0 --val-batch-size 16 --save-progress --cache-data --clean
 
 export STAGE1_TRAIN_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval_train/predictions.json
 export STAGE1_TEST_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval/predictions.json
@@ -29,7 +29,7 @@ export STAGE1_TEST_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval/predictions.
 小样本调试：
 
 ~~~bash
-python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --max-eval-videos 3 --save-progress --cache-data --num-workers 0 --device-ids 0 --val-batch-size 1 --clean
+python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --max-eval-videos 3 --save-progress --cache-data --num-workers 0 --device-ids 0 --val-batch-size 1 --clean
 ~~~
 
 中断后续跑时移除 `--clean` 并在原命令末尾使用 `--resume`；数据窗口缓存会自动复用。
