@@ -29,6 +29,7 @@ echo "LOCAL_BATCH_SIZE: $LOCAL_BATCH_SIZE"
 
 export TRANSFORMERS_OFFLINE=1
 export WANDB_PROJECT=trace_vllava
+REPORT_TO=${REPORT_TO:-none}
 export NCCL_P2P_LEVEL=NVL
 export HCCL_BUFFSIZE=1024
 RUN_NAME=trace_vllava
@@ -102,6 +103,7 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --model_max_length 4096 \
     --gradient_checkpointing True \
     --dataloader_num_workers ${NUM_WORKERS:-4} \
+    --report_to "$REPORT_TO" \
     --run_name $RUN_NAME \
     --lazy_preprocess True \
     --sample_scheme "rand"

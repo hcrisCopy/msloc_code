@@ -29,6 +29,7 @@ source Trace/scripts/setup_opd_grpo_env.sh
 ~~~
 
 所有 TRACE 训练脚本默认保持原有的按 epoch 保存；调试时显式设置 `SAVE_STEPS`。使用 `CLEAN=1` 清理对应输出目录；中断后移除 `CLEAN=1` 并使用 `RESUME_FROM_CHECKPOINT=auto` 续跑。
+默认不启用 W&B；需要记录到 W&B 时显式设置 `REPORT_TO=wandb`。
 
 ## 1. 使用已有 DeMamba checkpoint 生成训练集 proposal
 

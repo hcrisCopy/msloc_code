@@ -22,6 +22,7 @@ if [[ "$EXPLANATION_WEIGHT" != "0" && "$EXPLANATION_WEIGHT" != "0.0" && "$EXPLAN
   JUDGE_ARGS=(--grpo_explanation_judge_command "$EXPLANATION_JUDGE_COMMAND")
 fi
 OUT_DIR=${OUT_DIR:-"$MSLOC_ASSETS/Trace/output/grpo"}
+REPORT_TO=${REPORT_TO:-none}
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
@@ -57,4 +58,5 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --num_train_epochs ${EPOCHS:-1} --per_device_train_batch_size ${BATCH_SIZE:-1} \
   --gradient_accumulation_steps ${GRAD_ACCUM:-4} --learning_rate ${LR:-1e-6} \
   "${SAVE_ARGS[@]}" --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True --dataloader_num_workers ${NUM_WORKERS:-0} \
+  --report_to "$REPORT_TO" \
   --lazy_preprocess True --sample_scheme rand
