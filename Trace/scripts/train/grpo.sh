@@ -2,6 +2,7 @@
 # Deployment-distribution GRPO. There is no reference video or OPD teacher.
 # Explanation reward is computed locally from TASLE's reference evidence.
 set -euo pipefail
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 TRACE_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 export PYTHONPATH="$TRACE_DIR:${PYTHONPATH:-}"
@@ -39,7 +40,7 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
   esac
 fi
 
-torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
+torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-8} "$TRACE_DIR/trace/train_mt.py" \
   --deepspeed "$DEEPSPEED_CONFIG" \
   --version v1_mistral --vision_tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
   --mm_projector_type spatial_slot --tune_mm_mlp_adapter True --tune_mm_embed_head True --tune_lm_embed_head True \

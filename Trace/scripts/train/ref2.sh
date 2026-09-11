@@ -11,26 +11,15 @@ DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 PROPOSAL_PATH=${PROPOSAL_PATH:?Set PROPOSAL_PATH to DeMamba predictions.json generated on the training split}
 BASE_CKPT=${BASE_CKPT:-"$MSLOC_ASSETS/Trace/ckpts/trace-uni"}
 
-WORLD_SIZE=${WORLD_SIZE:-1}
-NPROC_PER_NODE=${NPROC_PER_NODE:-1}
-MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-MASTER_PORT=${MASTER_PORT:-16666}
-RANK=${RANK:-0}
-
-GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-4}
+NPROC_PER_NODE=${NPROC_PER_NODE:-8}
+LOCAL_BATCH_SIZE=${BATCH_SIZE:-2}
 GRADIENT_ACCUMULATION_STEPS=${GRAD_ACCUM:-2}
-DENOMINATOR=$(($WORLD_SIZE*$NPROC_PER_NODE*$GRADIENT_ACCUMULATION_STEPS))
-if [ "$GLOBAL_BATCH_SIZE" -lt "$DENOMINATOR" ] || [ $((GLOBAL_BATCH_SIZE % DENOMINATOR)) -ne 0 ]; then
-  echo "GLOBAL_BATCH_SIZE=$GLOBAL_BATCH_SIZE must be a positive multiple of WORLD_SIZE*NPROC_PER_NODE*GRADIENT_ACCUMULATION_STEPS=$DENOMINATOR" >&2
-  exit 2
-fi
-LOCAL_BATCH_SIZE=$(($GLOBAL_BATCH_SIZE/$DENOMINATOR))
-echo "LOCAL_BATCH_SIZE: $LOCAL_BATCH_SIZE"
 
 export TRANSFORMERS_OFFLINE=1
 export WANDB_PROJECT=trace_vllava
 REPORT_TO=${REPORT_TO:-none}
 export NCCL_P2P_LEVEL=NVL
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export HCCL_BUFFSIZE=1024
 RUN_NAME=trace_vllava
 OUTP_DIR=${OUTP_DIR:-"$MSLOC_ASSETS/Trace/output/trace_vllava/ref2"}
@@ -53,13 +42,9 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
     esac
 fi
 
-ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
-    --nproc_per_node $NPROC_PER_NODE \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
-    --node_rank $RANK \
+ASCEND_LAUNCH_BLOCKING=1 torchrun --standalone --nproc_per_node "$NPROC_PER_NODE" \
     "$TRACE_DIR/trace/train_mt.py" \
-    --deepspeed "$TRACE_DIR/scripts/zero3.json" \
+    --deepspeed "$TRACE_DIR/scripts/zero2.json" \
     --version v1_mistral \
     --vision_tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
     --mm_projector_type spatial_slot \
@@ -100,6 +85,7 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
+    --disable_tqdm False \
     --model_max_length 4096 \
     --gradient_checkpointing True \
     --dataloader_num_workers ${NUM_WORKERS:-4} \

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Validation only: this script never updates teacher or student parameters.
 set -euo pipefail
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 TRACE_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 export PYTHONPATH="$TRACE_DIR:${PYTHONPATH:-}"
@@ -11,7 +12,7 @@ REPLAY_PATH=${REPLAY_PATH:?Set REPLAY_PATH to normalized replay with resolved re
 SFT_CKPT=${SFT_CKPT:?Set SFT_CKPT to the candidate-only ref2-SFT checkpoint}
 OUT_PATH=${OUT_PATH:-"$MSLOC_ASSETS/Trace/output/opd_teacher_precheck.json"}
 
-python "$TRACE_DIR/scripts/precheck_opd_teacher.py" \
+torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-8} "$TRACE_DIR/scripts/precheck_opd_teacher.py" \
   --replay "$REPLAY_PATH" --data-folder "$DATA_ROOT/videos" \
   --model-path "$SFT_CKPT" --vision-tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
   --output "$OUT_PATH" --version v1_mistral --bnd-ratio 0.2 --bnd-frames 16 --seg-frames 8 \

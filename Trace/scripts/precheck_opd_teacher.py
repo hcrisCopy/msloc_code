@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import torch
+import torch.distributed as dist
+from tqdm.auto import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -164,6 +166,13 @@ def main() -> None:
     parser.add_argument("--minimum-reliable-positive-rate", type=float, default=0.05)
     args = parser.parse_args()
 
+    distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if distributed:
+        dist.init_process_group("nccl")
+    rank = dist.get_rank() if distributed else 0
+    world_size = dist.get_world_size() if distributed else 1
+    local_rank = int(os.environ.get("LOCAL_RANK", args.gpu_id))
+
     if not args.model_path:
         parser.error("--model-path is empty; run 'source Trace/scripts/setup_opd_grpo_env.sh' or set SFT_CKPT")
     if not Path(args.model_path).is_dir():
@@ -190,7 +199,9 @@ def main() -> None:
         if not reference.get("reference_video") or not reference.get("reference_segment"):
             raise ValueError(f"Paired replay record {record.get('id')} has no resolved fake->real reference mapping")
 
-    device = torch.device(f"cuda:{args.gpu_id}")
+    source_records = source_records[rank::world_size]
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
     if not torch.cuda.is_available():
         raise RuntimeError("precheck_opd_teacher.py requires a CUDA GPU")
     model_name = get_model_name_from_path(args.model_path)
@@ -213,7 +224,11 @@ def main() -> None:
     teacher_prompt = _prompt(tokenizer, PAIR_REFERENCE_INSTRUCTION + base_instruction, args.version)
 
     checked: List[Dict[str, Any]] = []
-    for index, record in enumerate(source_records, start=1):
+    iterator = tqdm(
+        source_records, desc=f"Teacher precheck rank {rank}", unit="proposal",
+        position=rank, leave=rank == 0, dynamic_ncols=True,
+    )
+    for index, record in enumerate(iterator, start=1):
         proposal = record["proposal"]
         start, end = float(proposal[0]), float(proposal[1])
         candidate_file = _video_path(args.data_folder, record["candidate_video"])
@@ -259,7 +274,15 @@ def main() -> None:
             "teacher_input_mode": teacher_input_mode,
             "teacher_reliable": reliable,
         })
-        print(f"[{index}/{len(source_records)}] {record['id']}: candidate={candidate_parsed.status}, pair={teacher_parsed.status}, reliable={reliable}", flush=True)
+        iterator.set_postfix(candidate=candidate_parsed.status, pair=teacher_parsed.status, reliable=reliable)
+
+    if distributed:
+        gathered = [None for _ in range(world_size)]
+        dist.all_gather_object(gathered, checked)
+        checked = [row for shard in gathered for row in shard]
+        if rank != 0:
+            dist.destroy_process_group()
+            return
 
     candidate_metrics = _summary(checked, "candidate_only", args.teacher_iou_gate)
     teacher_metrics = _summary(checked, "paired_teacher", args.teacher_iou_gate)
@@ -311,6 +334,8 @@ def main() -> None:
                 f"negative no-event drop={negative_drop:.4f} (allowed <= {args.maximum_negative_noevent_drop:.4f}). "
                 f"Report was still written to {output}; do not start OPD."
             )
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

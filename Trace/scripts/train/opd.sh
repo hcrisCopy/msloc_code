@@ -3,6 +3,7 @@
 # is the SFT checkpoint itself viewed through a real-reference/candidate pair;
 # it is never fine-tuned.  Run precheck_opd_teacher.py first.
 set -euo pipefail
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 TRACE_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 export PYTHONPATH="$TRACE_DIR:${PYTHONPATH:-}"
@@ -34,7 +35,7 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
   esac
 fi
 
-torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
+torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-8} "$TRACE_DIR/trace/train_mt.py" \
   --deepspeed "$DEEPSPEED_CONFIG" \
   --version v1_mistral --vision_tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
   --mm_projector_type spatial_slot --tune_mm_mlp_adapter True --tune_mm_embed_head True --tune_lm_embed_head True \
@@ -51,6 +52,6 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --bnd_ratio 0.2 --bnd_frames 16 --seg_frames 8 --bf16 True --output_dir "$OUT_DIR" \
   --num_train_epochs ${EPOCHS:-1} --per_device_train_batch_size ${BATCH_SIZE:-1} \
   --gradient_accumulation_steps ${GRAD_ACCUM:-4} --learning_rate ${LR:-2e-6} \
-  "${SAVE_ARGS[@]}" --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True --dataloader_num_workers ${NUM_WORKERS:-0} \
+  "${SAVE_ARGS[@]}" --logging_steps 1 --disable_tqdm False --model_max_length 4096 --gradient_checkpointing True --dataloader_num_workers ${NUM_WORKERS:-0} \
   --report_to "$REPORT_TO" \
   --lazy_preprocess True --sample_scheme rand
