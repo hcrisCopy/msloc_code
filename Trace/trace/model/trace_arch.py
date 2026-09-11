@@ -605,13 +605,16 @@ class TraceMetaForCausalLM(ABC):
                 cur_input_ids = input_ids[batch_idx]
 
                 # embed text input ids
-                cur_text_ids = cur_input_ids % self.vocab_size
+                # Generated TRACE trajectories contain ids from the joint
+                # text/time/score vocabulary.  Modulo gives every special id a
+                # safe temporary text embedding before it is overwritten below.
+                cur_text_ids = torch.remainder(cur_input_ids, self.vocab_size)
                 text_embeds = self.get_model().embed_tokens(cur_text_ids)
                 # embed sync
                 sync_positions = (cur_input_ids == self.vocab_size)
                 sync_embeds = self.get_sync_tower()(cur_input_ids[sync_positions])
                 # embed time input ids
-                time_positions = cur_input_ids >= (self.vocab_size + 1) and cur_input_ids < (self.vocab_size + self.time_vocab_size + 1)
+                time_positions = (cur_input_ids >= (self.vocab_size + 1)) & (cur_input_ids < (self.vocab_size + self.time_vocab_size + 1))
                 cur_time_ids = cur_input_ids[time_positions] - self.vocab_size - 1
                 time_embeds = self.get_time_tower()(cur_time_ids)
                 # embed score input ids
@@ -668,13 +671,40 @@ class TraceMetaForCausalLM(ABC):
             sync_token_indices = cur_new_input_ids == MMODAL_TOKEN_INDEX['SYNC']
             cur_sync_features = self.get_sync_tower()(cur_new_input_ids[sync_token_indices].to(cur_X_features.device))
 
-            cur_text_input_ids = torch.clamp(cur_new_input_ids, min=0)
+            # ``cur_new_input_ids`` may include negative placeholders while
+            # preparing SFT data and positive joint-vocabulary ids while
+            # re-scoring an OPD/GRPO rollout.  ``clamp(min=0)`` is unsafe for
+            # ids >= vocab_size; modulo is safe because all such positions are
+            # overwritten by their dedicated tower immediately afterwards.
+            cur_text_input_ids = torch.remainder(torch.clamp(cur_new_input_ids, min=0), self.vocab_size)
             cur_new_input_embeds = self.get_model().embed_tokens(cur_text_input_ids)
 
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['VIDEO']] = cur_X_features
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['TIME']] = cur_time_features
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['SCORE']] = cur_score_features
             cur_new_input_embeds[cur_new_input_ids == MMODAL_TOKEN_INDEX['SYNC']] = cur_sync_features
+
+            # Re-scoring a generated trajectory uses actual joint-vocabulary
+            # ids, not the SFT-only <time>/<score> placeholders above.  Support
+            # both paths so policy log-probabilities are computed with the same
+            # embeddings that generation used.
+            generated_sync = cur_new_input_ids == self.vocab_size
+            generated_time = (cur_new_input_ids >= (self.vocab_size + 1)) & (cur_new_input_ids < (self.vocab_size + self.time_vocab_size + 1))
+            generated_score = cur_new_input_ids >= (self.vocab_size + self.time_vocab_size + 1)
+            if generated_sync.any():
+                cur_new_input_embeds[generated_sync] = self.get_sync_tower()(cur_new_input_ids[generated_sync])
+            if generated_time.any():
+                generated_time_ids = cur_new_input_ids[generated_time] - self.vocab_size - 1
+                cur_new_input_embeds[generated_time] = self.get_time_tower()(generated_time_ids)
+            if generated_score.any():
+                generated_score_ids = cur_new_input_ids[generated_score] - self.vocab_size - self.time_vocab_size - 1
+                # Ignore out-of-range junk ids here; the output parser will
+                # mark the trajectory invalid.  This prevents a malformed
+                # sample from crashing a complete GRPO group.
+                valid_score = (generated_score_ids >= 0) & (generated_score_ids < self.score_vocab_size)
+                if valid_score.any():
+                    positions = torch.where(generated_score)[0][valid_score]
+                    cur_new_input_embeds[positions] = self.get_score_tower()(generated_score_ids[valid_score])
 
             if labels is not None:
                 cur_labels = labels[batch_idx]

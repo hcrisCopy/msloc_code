@@ -28,6 +28,7 @@ from trace.mm_utils import get_model_name_from_path, tokenizer_MMODAL_token, pro
 from trace.model.builder import load_pretrained_model
 from trace.conversation import conv_templates, SeparatorStyle
 from trace.mm_utils import tokenizer_MMODAL_token_all, KeywordsStoppingCriteria
+from trace.opd_grpo import TraceTokenSpec, parse_trace_tokens, VALID_EVENT, VALID_NO_EVENT, FORMAT_FAILURE
 
 from transformers import StoppingCriteria, StoppingCriteriaList
 from math import ceil
@@ -250,6 +251,11 @@ def main(args):
     time_token_end = model.vocab_size + model.config.time_vocab_size
     time_sync_id = time_token_start + model.get_model().time_tokenizer.vocab['<sync>']
     time_sep_id = time_token_start + model.get_model().time_tokenizer.vocab['<sep>']
+    trace_token_spec = TraceTokenSpec(
+        text_vocab_size=model.vocab_size,
+        time_vocab=model.get_model().time_tokenizer.vocab,
+        score_vocab_size=model.config.score_vocab_size,
+    )
     
     # Check and print closs status
     closs_status = getattr(model.config, 'closs', False)
@@ -357,6 +363,7 @@ def main(args):
 
         model_inference_segments = []
         model_inference_responses = []
+        raw_generations = []
         is_fake = (item.get('type') == 'fake')
 
         for segment in source_segments:
@@ -377,6 +384,7 @@ def main(args):
             if win_e <= win_s:
                 print(f"Invalid window for {vid_path}: {win_s}-{win_e}")
                 model_inference_segments.append([-99, -99])
+                raw_generations.append({"status": FORMAT_FAILURE, "failure_reasons": ["invalid_proposal_window"], "raw_token_ids": []})
                 continue
 
             try:
@@ -437,6 +445,15 @@ def main(args):
                         video_timestamps=video_timestamps,
                         heads=heads
                     )
+
+                raw_output_ids = [int(x) for x in output_ids[0].detach().cpu().tolist()]
+                strict_parse = parse_trace_tokens(
+                    raw_output_ids,
+                    trace_token_spec,
+                    lambda ids: safe_decode_text(tokenizer, ids),
+                    window_duration=win_e - win_s,
+                )
+                raw_generations.append(strict_parse.as_dict())
 
                 parsed_segments = []
                 cur_timestamps = []
@@ -506,6 +523,7 @@ def main(args):
                 traceback.print_exc()
                 print(f'generate for video {vid_path} segment {segment} failed')
                 model_inference_segments.append([-99, -99])
+                raw_generations.append({"status": FORMAT_FAILURE, "failure_reasons": ["generation_exception"], "raw_token_ids": []})
 
         # Build the output item.
         final_output = item.copy()
@@ -522,13 +540,27 @@ def main(args):
         
         model_inference = {
             "segment": valid_segments,
-            "response": valid_responses
+            "response": valid_responses,
+            # Retain the legacy fake/real field below for existing downstream
+            # scripts, but expose the raw parser result so malformed output is
+            # never mistaken for a semantically correct no-forgery decision.
+            "raw_generation": raw_generations,
+            "parse_status": [entry["status"] for entry in raw_generations],
         }
         
         if len(valid_segments) == 0:
             model_inference["type"] = "real"
         else:
             model_inference["type"] = "fake"
+        statuses = set(model_inference["parse_status"])
+        if FORMAT_FAILURE in statuses:
+            model_inference["decision_status"] = "contains_format_failure"
+        elif statuses == {VALID_NO_EVENT}:
+            model_inference["decision_status"] = "semantic_no_event"
+        elif VALID_EVENT in statuses:
+            model_inference["decision_status"] = "semantic_event"
+        else:
+            model_inference["decision_status"] = "unknown"
             
         final_output['model_inference'] = model_inference
 

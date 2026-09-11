@@ -21,6 +21,25 @@ from scenedetect.stats_manager import StatsManager
 from .constants import NUM_FRAMES, MAX_FRAMES, NUM_FRAMES_PER_SECOND, MMODAL_INDEX_TOKEN, IMAGE_TOKEN_INDEX, DEFAULT_MMODAL_TOKEN, MMODAL_TOKEN_INDEX
 
 
+def make_vertical_reference_pair(reference_video: torch.Tensor, candidate_video: torch.Tensor) -> torch.Tensor:
+    """Create a full-resolution upper-reference/lower-candidate video.
+
+    Both inputs are already image-processor-normalized tensors shaped
+    ``[T, C, H, W]``.  The result is ``[T, C, 2H, W]``: the upper and lower
+    views retain every original pixel.  TRACE's CLIP tower interpolates its
+    *positional embeddings* for this teacher-only non-square canvas (see
+    ``CLIPVisionTower``); resampling the actual frames would erase precisely
+    the fine texture and boundary evidence needed for forgery localization.
+    """
+    if reference_video.ndim != 4 or candidate_video.ndim != 4:
+        raise ValueError("reference and candidate videos must be [T, C, H, W]")
+    if reference_video.shape != candidate_video.shape:
+        raise ValueError(
+            f"reference/candidate tensors must match, got {tuple(reference_video.shape)} and {tuple(candidate_video.shape)}"
+        )
+    return torch.cat([reference_video, candidate_video], dim=2)
+
+
 def merge_scenes(cut_list, cut_scores, scene_list,num_frames,max_scene_num=4, num_frame_per_scene=8, min_frames_per_scene=30):
     if len(scene_list) == len(cut_list) and len(scene_list) == 0:
         frame_ids = np.linspace(0, num_frames-1, num_frame_per_scene, dtype=int)  # only one scene for current video

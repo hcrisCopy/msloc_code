@@ -55,9 +55,10 @@ sys.path.insert(0, repo_root)
 
 from trace import conversation as conversation_lib
 from trace.constants import NUM_FRAMES, IGNORE_INDEX, MMODAL_TOKEN_INDEX, DEFAULT_MMODAL_TOKEN, DEFAULT_MMODAL_START_TOKEN, DEFAULT_MMODAL_END_TOKEN, MMODAL_INDEX_TOKEN
-from trace.trace_trainer import TraceTrainer
+from trace.trace_trainer import TraceTrainer, TraceGRPOTrainer, TraceOPDTrainer
+from trace.opd_grpo import CommandExplanationJudge, PAIR_REFERENCE_INSTRUCTION
 from trace.model import *
-from trace.mm_utils import tokenizer_MMODAL_token, tokenizer_image_token, expand2square, process_video, process_image, tokenizer_MMODAL_token_all, process_video_ref_split
+from trace.mm_utils import tokenizer_MMODAL_token, tokenizer_image_token, expand2square, process_video, process_image, tokenizer_MMODAL_token_all, process_video_ref_split, make_vertical_reference_pair
 import trace.mm_utils as mm_utils_module
 
 from trace.model.multimodal_projector.builder import load_mm_projector
@@ -139,6 +140,11 @@ class DataArguments:
     
     # Ref2 Mode Arguments
     proposal_path: str = field(default=None, metadata={"help": "Path to the proposal file for ref2 mode."})
+    replay_path: Optional[str] = field(default=None, metadata={"help": "Normalized replay JSON from scripts/build_opd_grpo_replay.py."})
+    replay_balance: str = field(default="none", metadata={"help": "Replay fractions positive,hard_positive,near_hard_negative,real_false_positive; use none to retain source frequency."})
+    opd_teacher_cache_path: Optional[str] = field(default=None, metadata={"help": "Required by OPD: JSON emitted by scripts/precheck_opd_teacher.py for the identical replay and frozen teacher checkpoint."})
+    reference_map_path: Optional[str] = field(default=None, metadata={"help": "Optional candidate->real-reference mapping used only by OPD teacher paths."})
+    use_reference_pair: bool = field(default=False, metadata={"help": "Internal: decode and vertically pair real references for OPD teacher stages only."})
 
 
 @dataclass
@@ -176,6 +182,35 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_dropout: float = 0.05
     lora_weight_path: str = ""
     lora_bias: str = "none"
+    # Training stage.  ``sft`` retains the original Trace/ref2 objective;
+    # OPD and GRPO are selected only by the new scripts and never alter eval.
+    second_stage: str = field(default="sft", metadata={"help": "One of: sft, opd, grpo. opd_teacher_sft is explicitly retired."})
+    opd_weight: float = field(default=1.0)
+    opd_temperature: float = field(default=1.0)
+    opd_disagreement_iou_gate: float = field(default=0.3)
+    opd_false_refusal_weight: float = field(default=1.0)
+    opd_positive_error_weight: float = field(default=0.8)
+    opd_negative_error_weight: float = field(default=0.8)
+    opd_positive_anchor_weight: float = field(default=0.2)
+    opd_negative_anchor_weight: float = field(default=0.2)
+    opd_guided_positive_fraction: float = field(default=0.0)
+    opd_guided_alpha: float = field(default=0.5)
+    opd_guided_max_tokens: int = field(default=16)
+    opd_teacher_iou_gate: float = field(default=0.3)
+    opd_teacher_model_path: Optional[str] = field(default=None)
+    grpo_group_size: int = field(default=4)
+    grpo_temperature: float = field(default=0.7)
+    grpo_max_new_tokens: int = field(default=128)
+    grpo_clip_range: float = field(default=0.2)
+    grpo_kl_coef: float = field(default=0.02)
+    grpo_sft_coef: float = field(default=0.1)
+    grpo_localization_weight: float = field(default=1.0)
+    grpo_explanation_weight: float = field(default=0.0)
+    grpo_format_weight: float = field(default=0.1)
+    grpo_explanation_iou_gate: float = field(default=0.3)
+    grpo_boundary_tolerance: float = field(default=1.0)
+    grpo_structure_aware: bool = field(default=True)
+    grpo_explanation_judge_command: Optional[str] = field(default=None, metadata={"help": "Trusted command implementing the documented candidate-only VLM judge JSON contract."})
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -729,46 +764,105 @@ class LazySupervisedDataset(Dataset):
         self._external_class_to_idx = class_to_idx  # class-name -> idx loaded from feature file
 
         if getattr(data_args, 'train_mode', 'loc') == 'ref2':
-            rank0_print(f"Loading GT data from {data_path}...")
-            gt_data = json.load(open(data_path, "r"))
-            # Build GT map: video_path -> item
-            gt_map = {}
-            for item in gt_data:
-                vid = item.get('video_path') or item.get('video') or item.get('image_id')
-                if vid:
-                    gt_map[vid] = item
-            
-            if not data_args.proposal_path:
-                raise ValueError("proposal_path must be provided for ref2 mode.")
-
-            rank0_print(f"Loading Proposal data from {data_args.proposal_path}...")
-            proposal_data = json.load(open(data_args.proposal_path, "r"))
-            
             self.list_data_dict = []
-            for item in proposal_data:
-                vid = item.get('video_path') or item.get('video') or item.get('image_id')
-                gt_item = gt_map.get(vid)
-                
-                if not gt_item:
-                    continue
-                
-                # Get proposals
-                proposals = []
-                if "model_inference" in item and "segment" in item["model_inference"]:
-                    proposals = item["model_inference"]["segment"]
-                
-                for prop in proposals:
-                    if not prop or len(prop) < 2: continue
-                    # Create a new sample for each proposal
-                    new_sample = {
-                        "video": vid,
-                        "proposal": prop, # [start, end]
-                        "gt_item": gt_item, # Contains annotations
-                        "type": "ref2_sample" # Marker
-                    }
-                    self.list_data_dict.append(new_sample)
-            
-            rank0_print(f"Loaded {len(self.list_data_dict)} proposals for ref2 training.")
+            # The normalized replay format is required for OPD/GRPO because it
+            # retains proposal provenance, matched annotations and optional real
+            # reference mappings.  The legacy GT+proposal fallback remains for
+            # reproducing old ref2 SFT runs.
+            if data_args.replay_path:
+                rank0_print(f"Loading normalized replay from {data_args.replay_path}...")
+                replay = json.load(open(data_args.replay_path, "r", encoding="utf-8"))
+                records = replay.get("records", replay) if isinstance(replay, dict) else replay
+                if not isinstance(records, list):
+                    raise ValueError("replay_path must contain a list or an object with a records list")
+                teacher_cache = {}
+                if data_args.opd_teacher_cache_path:
+                    cache_payload = json.load(open(data_args.opd_teacher_cache_path, "r", encoding="utf-8"))
+                    cache_records = cache_payload.get("records", cache_payload) if isinstance(cache_payload, dict) else cache_payload
+                    if not isinstance(cache_records, list):
+                        raise ValueError("opd_teacher_cache_path must contain a list or an object with a records list")
+                    teacher_cache = {entry.get("id"): entry for entry in cache_records if isinstance(entry, dict) and entry.get("id")}
+                    rank0_print(f"Loaded {len(teacher_cache)} frozen-teacher precheck records.")
+                for record in records:
+                    proposal = record.get("proposal", [])
+                    candidate = record.get("candidate_video")
+                    if not candidate or not isinstance(proposal, list) or len(proposal) != 2:
+                        continue
+                    # Preserve optional replay metadata alongside the raw
+                    # annotation for backward-compatible analysis. It is not a
+                    # hard gate for explanation reward: Qwen evaluates visual
+                    # support online for every matched event.
+                    annotations = []
+                    for target in record.get("targets", []):
+                        if not target.get("annotation"):
+                            continue
+                        annotation = copy.deepcopy(target["annotation"])
+                        annotation["candidate_observable"] = bool(
+                            target.get("evidence", {}).get("candidate_observable", False)
+                        )
+                        annotations.append(annotation)
+                    self.list_data_dict.append({
+                        "video": candidate,
+                        "proposal": proposal,
+                        "gt_item": {"annotations": annotations},
+                        "type": "ref2_sample",
+                        "replay_record": record,
+                        "reference": record.get("reference"),
+                        "teacher_cache": teacher_cache.get(record.get("id")),
+                    })
+                if data_args.replay_balance.lower() != "none":
+                    bucket_names = ("positive", "hard_positive", "near_hard_negative", "real_false_positive")
+                    try:
+                        fractions = [float(x.strip()) for x in data_args.replay_balance.split(",")]
+                    except ValueError as exc:
+                        raise ValueError("replay_balance must be 'none' or four comma-separated fractions") from exc
+                    if len(fractions) != 4 or any(x < 0 for x in fractions) or sum(fractions) <= 0:
+                        raise ValueError("replay_balance must contain four non-negative fractions with positive sum")
+                    groups = {bucket: [] for bucket in bucket_names}
+                    for sample in self.list_data_dict:
+                        bucket = sample.get("replay_record", {}).get("replay_bucket")
+                        if bucket in groups:
+                            groups[bucket].append(sample)
+                    rng = random.Random(42)
+                    source_count = len(self.list_data_dict)
+                    balanced = []
+                    for bucket, fraction in zip(bucket_names, fractions):
+                        desired = round(source_count * fraction / sum(fractions))
+                        group = groups[bucket]
+                        if desired and not group:
+                            rank0_print(f"[Replay WARNING] requested {bucket}={desired} but this bucket is empty; no synthetic replacement is created")
+                            continue
+                        if desired <= len(group):
+                            balanced.extend(rng.sample(group, desired))
+                        elif group:
+                            balanced.extend(rng.choices(group, k=desired))
+                    rng.shuffle(balanced)
+                    self.list_data_dict = balanced
+                    rank0_print(f"Stratified replay to {len(self.list_data_dict)} samples using {data_args.replay_balance}; source buckets: " + str({k: len(v) for k, v in groups.items()}))
+                rank0_print(f"Loaded {len(self.list_data_dict)} normalized replay proposals.")
+            else:
+                rank0_print(f"Loading GT data from {data_path}...")
+                gt_data = json.load(open(data_path, "r"))
+                gt_map = {}
+                for item in gt_data:
+                    vid = item.get('video_path') or item.get('video') or item.get('image_id')
+                    if vid:
+                        gt_map[vid] = item
+                if not data_args.proposal_path:
+                    raise ValueError("proposal_path must be provided for ref2 mode when replay_path is absent.")
+                rank0_print(f"Loading Proposal data from {data_args.proposal_path}...")
+                proposal_data = json.load(open(data_args.proposal_path, "r"))
+                for item in proposal_data:
+                    vid = item.get('video_path') or item.get('video') or item.get('image_id')
+                    gt_item = gt_map.get(vid)
+                    if not gt_item:
+                        continue
+                    proposals = item.get("model_inference", {}).get("segment", [])
+                    for prop in proposals:
+                        if not prop or len(prop) < 2:
+                            continue
+                        self.list_data_dict.append({"video": vid, "proposal": prop, "gt_item": gt_item, "type": "ref2_sample"})
+                rank0_print(f"Loaded {len(self.list_data_dict)} legacy proposals for ref2 training.")
 
         else:
             list_data_dict = json.load(open(data_path, "r"))
@@ -1041,6 +1135,7 @@ class LazySupervisedDataset(Dataset):
             updated_times = []
             captions = []
             matched_classes = []
+            matched_evidence = []
             
             for ann in gt_annotations:
                 seg = ann.get('segment', [])
@@ -1055,8 +1150,6 @@ class LazySupervisedDataset(Dataset):
                     # Relative time
                     rel_s = inter0 - win_start
                     rel_e = inter1 - win_start
-                    updated_times.append([rel_s, rel_e])
-                    
                     temp_classes = ['', '', '']
                     # Get caption
                     caption = ""
@@ -1085,12 +1178,38 @@ class LazySupervisedDataset(Dataset):
                             # Warn when the obj_cot class is empty.
                             if not _c2:
                                 print(f"[WARN] Empty obj_cot class detected! obj_cot={ann.get('obj_cot')}", flush=True)
+                        def _first_entry(value):
+                            if isinstance(value, dict):
+                                return value
+                            if isinstance(value, list) and value and isinstance(value[0], dict):
+                                return value[0]
+                            return {}
+                        _obj = _first_entry(ann.get('obj_cot'))
+                        _st = _first_entry(ann.get('bnd_cot_st'))
+                        _ed = _first_entry(ann.get('bnd_cot_ed'))
+                        _round4 = 'Round4' in ann.get("combine_dir", "")
+                        matched_evidence.append({
+                            "object_caption": _obj.get("obj_caption", ""),
+                            "object_class": _obj.get("bnd_sub_class", ""),
+                            "start_caption": "" if _round4 else _st.get("bnd_caption", ""),
+                            "start_class": "" if _round4 else _st.get("bnd_class", ""),
+                            "end_caption": "" if _round4 else _ed.get("bnd_caption", ""),
+                            "end_class": "" if _round4 else _ed.get("bnd_class", ""),
+                            "manipulation_type": "spatio-temporal" if _round4 else "temporal",
+                            # Optional diagnostic metadata; Qwen's online
+                            # candidate-frame judgment, not this bit, decides
+                            # visual support for explanation reward.
+                            "candidate_observable": bool(ann.get("candidate_observable", False)),
+                        })
+                        # Keep all four per-event lists in the same order.  In
+                        # particular, do not leave a time target behind if its
+                        # caption/evidence extraction fails.
+                        updated_times.append([rel_s, rel_e])
                         matched_classes.append(temp_classes)
+                        captions.append(caption)
                     except Exception as e:
                         print(f"[WARN] Failed to extract classes for ann={ann}: {e}")
                         continue
-                    
-                    captions.append(caption)
 
             # Build conversation
             conv = []
@@ -1139,6 +1258,43 @@ class LazySupervisedDataset(Dataset):
                 print(f"Error processing video {video_file}: {e}")
                 raise e
 
+            # A reference is a training-only privileged input.  It must be a
+            # real, separately mapped clip with an explicit aligned interval;
+            # copying the candidate here would make OPD scientifically invalid.
+            # Every OPD row has a frozen-teacher view.  For a real proposal
+            # with no independent counterpart this is the candidate itself,
+            # used only as a candidate-only no-event anchor.  It is never
+            # presented as a fake/real visual pair.
+            teacher_video = video
+            has_reference_pair = False
+            reference = sources.get('reference')
+            if reference and self.data_args.use_reference_pair:
+                reference_video = reference.get('reference_video')
+                reference_segment = reference.get('reference_segment') or reference.get('reference_window')
+                if not reference_video or not isinstance(reference_segment, (list, tuple)) or len(reference_segment) != 2:
+                    raise ValueError(
+                        f"Replay sample {sources.get('replay_record', {}).get('id', i)} has a reference descriptor "
+                        "without reference_video and explicit reference_segment. Refusing to fabricate an OPD pair."
+                    )
+                reference_file = reference_video if os.path.isabs(reference_video) else os.path.join(self.data_args.data_folder, reference_video)
+                ref_start, ref_end = float(reference_segment[0]), float(reference_segment[1])
+                if ref_start >= ref_end:
+                    raise ValueError(f"Invalid reference_segment {reference_segment} for {reference_video}")
+                ref_video, ref_timestamps = process_video_ref_split(
+                    reference_file,
+                    video_processor,
+                    self.data_args.image_aspect_ratio,
+                    bnd_frames=self.data_args.bnd_frames,
+                    seg_frames=self.data_args.seg_frames,
+                    bnd_ratio=self.data_args.bnd_ratio,
+                    start_time=ref_start,
+                    end_time=ref_end,
+                )
+                # Upper real reference + lower candidate at the original CLIP
+                # input size. Candidate timestamps remain the decoding clock.
+                teacher_video = make_vertical_reference_pair(ref_video, video)
+                has_reference_pair = True
+
             # Preprocess conversation
             sources_list = [{"conversations": conv}]
             sources_list = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources_list]), self.data_args)
@@ -1146,11 +1302,42 @@ class LazySupervisedDataset(Dataset):
             
             data_dict = preprocess(sources_list, self.tokenizer, MODAL_list=MODAL_list)
             data_dict = dict(input_ids=data_dict["input_ids"][0], labels=data_dict["labels"][0])
+
+            # The frozen teacher gets an explicit description of the vertical
+            # pair.  Keep a separate prompt tensor: the candidate-only student
+            # must never be trained with a claim that it can see the reference.
+            if teacher_video is not None:
+                teacher_conv = copy.deepcopy(conv)
+                if has_reference_pair:
+                    teacher_conv[0]["value"] = "<video>\n" + PAIR_REFERENCE_INSTRUCTION + teacher_conv[0]["value"].replace("<video>\n", "", 1)
+                    teacher_sources = preprocess_multimodal(copy.deepcopy([teacher_conv]), self.data_args)
+                    teacher_processed = preprocess(teacher_sources, self.tokenizer, MODAL_list=MODAL_list)
+                    data_dict["teacher_input_ids"] = teacher_processed["input_ids"][0]
+                    data_dict["teacher_labels"] = teacher_processed["labels"][0]
+                else:
+                    data_dict["teacher_input_ids"] = data_dict["input_ids"].clone()
+                    data_dict["teacher_labels"] = data_dict["labels"].clone()
             
             data_dict['time'] = times
             data_dict['score'] = scores
             data_dict['video'] = video
             data_dict['video_timestamps'] = video_timestamps
+            if teacher_video is not None:
+                data_dict['teacher_video'] = teacher_video
+                data_dict['teacher_video_timestamps'] = video_timestamps
+            data_dict['rl_target'] = {
+                "id": sources.get('replay_record', {}).get('id', f"{sources.get('video')}::{i}"),
+                "candidate_video": video_file,
+                "proposal": [win_start, win_end],
+                "target_segments": [list(x) for x in updated_times],
+                "evidence": matched_evidence,
+                "is_positive": bool(updated_times),
+                "has_reference": has_reference_pair,
+                # Precomputed with the frozen paired-input teacher before OPD.
+                # It is a reliability gate only; teacher logits are still
+                # evaluated on the student's sampled prefixes during OPD.
+                "teacher_cache": sources.get("teacher_cache"),
+            }
             
             # Handle classes for closs.
             # If matched_classes is empty, the proposal window does not overlap
@@ -1556,7 +1743,26 @@ class DataCollatorForSupervisedDataset(object):
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
 
+        # Present only for OPD paired-teacher rows.  They are deliberately
+        # separate from student input_ids/labels because the teacher prompt
+        # describes the upper/lower reference layout.
+        if all("teacher_input_ids" in instance and "teacher_labels" in instance for instance in instances):
+            teacher_input_ids = torch.nn.utils.rnn.pad_sequence(
+                [instance["teacher_input_ids"] for instance in instances],
+                batch_first=True,
+                padding_value=self.tokenizer.pad_token_id,
+            )[:, :self.tokenizer.model_max_length]
+            teacher_labels = torch.nn.utils.rnn.pad_sequence(
+                [instance["teacher_labels"] for instance in instances],
+                batch_first=True,
+                padding_value=IGNORE_INDEX,
+            )[:, :self.tokenizer.model_max_length]
+            batch["teacher_input_ids"] = teacher_input_ids
+            batch["teacher_labels"] = teacher_labels
+
         Xs, keys = [], []
+        teacher_Xs, teacher_keys, teacher_video_timestamps = [], [], []
+        rl_targets = []
         ##############################################################################################################
         times, scores, video_timestamps = [], [], []
         closs_input_ids = []
@@ -1574,6 +1780,11 @@ class DataCollatorForSupervisedDataset(object):
                         Xs.append(instance[x])
                         keys.append(x)
             video_timestamps.append(instance['video_timestamps'])
+            if 'teacher_video' in instance:
+                teacher_Xs.append(instance['teacher_video'])
+                teacher_keys.append('video')
+                teacher_video_timestamps.append(instance.get('teacher_video_timestamps', instance['video_timestamps']))
+            rl_targets.append(instance.get('rl_target'))
             
             # Handle classes
             cur_classes = instance.get('classes', ['', '', ''])
@@ -1622,6 +1833,11 @@ class DataCollatorForSupervisedDataset(object):
         batch['times'] = times
         batch['scores'] = scores
         batch['video_timestamps'] = video_timestamps
+        # Kept separate from deployment inputs.  OPDTrainer refuses to run if
+        # any requested proposal lacks this explicitly constructed pair.
+        batch['teacher_images'] = [teacher_Xs, teacher_keys]
+        batch['teacher_video_timestamps'] = teacher_video_timestamps
+        batch['rl_targets'] = rl_targets
 
         # Process all_class_ids if available
         if self.all_class_ids is not None:
@@ -2008,9 +2224,122 @@ def train(attn_implementation="eager"):
         else:
             rank0_print("[CLoss WARNING] Model does not have class_to_idx, Dataset will use dynamically collected classes")
         
+    # Do not decode privileged pairs for ordinary ref2 SFT or deployment-style
+    # GRPO. Only candidate-only OPD may access them through a frozen teacher.
+    data_args.use_reference_pair = training_args.second_stage == "opd"
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args, class_to_idx=model_class_to_idx)
-    # select a Trainer
-    trainer = TraceTrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    # Select the second-stage objective.  GRPO starts from the current OPD
+    # checkpoint and freezes an exact copy as its KL reference.
+    if training_args.second_stage not in {"sft", "opd_teacher_sft", "opd", "grpo"}:
+        raise ValueError(f"Unknown --second_stage {training_args.second_stage!r}")
+    if training_args.second_stage in {"opd", "grpo"}:
+        if not data_args.replay_path:
+            raise ValueError(f"{training_args.second_stage.upper()} requires a normalized paired-only replay")
+        replay_manifest = json.load(open(data_args.replay_path, "r", encoding="utf-8"))
+        if not isinstance(replay_manifest, dict) or replay_manifest.get("paired_only") is not True:
+            raise ValueError(
+                f"{training_args.second_stage.upper()} is restricted to fake videos with an existing `_real` counterpart. "
+                "Rebuild replay with scripts/build_opd_grpo_replay.py --paired-only --video-root ..."
+            )
+    if training_args.second_stage == "grpo":
+        if data_args.train_mode != "ref2" or not data_args.replay_path:
+            raise ValueError("GRPO must use train_mode=ref2 and a normalized --replay_path built from real stage-1 proposals")
+        if training_args.grpo_group_size < 2:
+            raise ValueError("GRPO requires --grpo_group_size >= 2")
+        if training_args.grpo_explanation_weight > 0 and not training_args.grpo_explanation_judge_command:
+            raise ValueError(
+                "Explanation reward requires --grpo_explanation_judge_command for a frozen candidate-only VLM judge. "
+                "Set the weight to 0 for the localization+format warm-up; do not fall back to text similarity."
+            )
+        reference_model = copy.deepcopy(model).eval()
+        reference_model.requires_grad_(False)
+        explanation_judge = (
+            CommandExplanationJudge(training_args.grpo_explanation_judge_command)
+            if training_args.grpo_explanation_weight > 0 else None
+        )
+        trainer = TraceGRPOTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            args=training_args,
+            reference_model=reference_model,
+            explanation_judge=explanation_judge,
+            **data_module,
+        )
+    elif training_args.second_stage == "opd_teacher_sft":
+        raise ValueError(
+            "opd_teacher_sft is retired for this method. Keep the SFT checkpoint frozen and run "
+            "scripts/precheck_opd_teacher.py before candidate-only OPD."
+        )
+    elif training_args.second_stage == "opd":
+        if data_args.train_mode != "ref2" or not data_args.replay_path:
+            raise ValueError("OPD must use train_mode=ref2 and normalized replay with real reference mappings")
+        if not training_args.opd_teacher_model_path:
+            raise ValueError(
+                "OPD requires --opd_teacher_model_path. Set it to the frozen SFT checkpoint "
+                "that was evaluated by scripts/precheck_opd_teacher.py; do not train a teacher."
+            )
+        if not data_args.opd_teacher_cache_path:
+            raise ValueError(
+                "OPD requires --opd_teacher_cache_path from scripts/precheck_opd_teacher.py. "
+                "The paired-input teacher must be validated before distillation."
+            )
+        cache_manifest = json.load(open(data_args.opd_teacher_cache_path, "r", encoding="utf-8"))
+        cached_teacher_path = cache_manifest.get("teacher_model_path") if isinstance(cache_manifest, dict) else None
+        if cached_teacher_path and os.path.normcase(os.path.abspath(cached_teacher_path)) != os.path.normcase(os.path.abspath(training_args.opd_teacher_model_path)):
+            raise ValueError(
+                "OPD teacher cache was generated with a different checkpoint. "
+                f"cache={cached_teacher_path}, --opd_teacher_model_path={training_args.opd_teacher_model_path}."
+            )
+        cached_replay_path = cache_manifest.get("replay_path") if isinstance(cache_manifest, dict) else None
+        if cached_replay_path and os.path.normcase(os.path.abspath(cached_replay_path)) != os.path.normcase(os.path.abspath(data_args.replay_path)):
+            raise ValueError(
+                "OPD teacher cache was generated from a different replay file. "
+                f"cache={cached_replay_path}, --replay_path={data_args.replay_path}."
+            )
+        missing_pairs = [
+            sample.get("replay_record", {}).get("id", sample.get("video"))
+            for sample in data_module["train_dataset"].list_data_dict
+            if not sample.get("reference") or not sample["reference"].get("reference_video")
+            or not (sample["reference"].get("reference_segment") or sample["reference"].get("reference_window"))
+        ]
+        if missing_pairs:
+            raise ValueError(f"OPD replay has {len(missing_pairs)} records without an explicit real reference pair; first: {missing_pairs[0]}")
+        missing_cache = [sample.get("replay_record", {}).get("id", sample.get("video")) for sample in data_module["train_dataset"].list_data_dict if not sample.get("teacher_cache")]
+        if missing_cache:
+            raise ValueError(
+                f"OPD teacher precheck is missing {len(missing_cache)} replay records; first: {missing_cache[0]}. "
+                "Re-run precheck with the same replay and do not train on an unvalidated pair."
+            )
+        if not (0.0 <= training_args.opd_guided_positive_fraction <= 1.0):
+            raise ValueError("--opd_guided_positive_fraction must be in [0, 1]")
+        if not (0.0 <= training_args.opd_guided_alpha <= 1.0):
+            raise ValueError("--opd_guided_alpha must be in [0, 1]")
+        if not (0.0 <= training_args.opd_disagreement_iou_gate <= 1.0):
+            raise ValueError("--opd_disagreement_iou_gate must be in [0, 1]")
+        for name in (
+            "opd_false_refusal_weight", "opd_positive_error_weight", "opd_negative_error_weight",
+            "opd_positive_anchor_weight", "opd_negative_anchor_weight",
+        ):
+            if getattr(training_args, name) < 0:
+                raise ValueError(f"--{name} must be non-negative")
+        teacher_config = copy.deepcopy(model.config)
+        teacher_model = TraceMistralForCausalLM.from_pretrained(
+            training_args.opd_teacher_model_path,
+            config=teacher_config,
+            cache_dir=training_args.cache_dir,
+            torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+        )
+        teacher_model.config.use_cache = False
+        teacher_model.requires_grad_(False)
+        trainer = TraceOPDTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            args=training_args,
+            teacher_model=teacher_model,
+            **data_module,
+        )
+    else:
+        trainer = TraceTrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
     # Force load from model_name_or_path, ignoring existing checkpoints in output_dir
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

@@ -18,17 +18,17 @@ DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 
 # ============================ Configurable parameters ============================
 DIR="$TRACE_DIR"
-# MODEL_DIR=${MODEL_DIR:-"$MSLOC_ASSETS/Trace/output/trace_vllava/ref2"}
-
-# base as test
-MODEL_DIR=${MODEL_DIR:-"$MSLOC_ASSETS/Trace/ckpts/trace-uni"}
+# Set this explicitly to the final SFT, OPD, or GRPO checkpoint being tested.
+# Falling back to trace-uni silently evaluates the base model rather than the
+# requested second-stage method.
+MODEL_DIR=${MODEL_DIR:?Set MODEL_DIR to the checkpoint directory to evaluate}
 
 TASK='dvc'
 DATASET='aigc'
 SPLIT='test'
 
 # Proposal JSON for inference
-TEST_ANNO_FILE=${TEST_ANNO_FILE:-"$MSLOC_ASSETS/DeMamba/results/all_Class_4/eval/predictions.json"}
+TEST_ANNO_FILE=${TEST_ANNO_FILE:?Set TEST_ANNO_FILE to DeMamba predictions.json generated on the test split}
 
 RAW_ANNO_FILE=${RAW_ANNO_FILE:-"$DATA_ROOT/annos/test_all_1209.json"}
 

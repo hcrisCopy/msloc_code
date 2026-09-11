@@ -8,7 +8,8 @@ export PYTHONPATH="$TRACE_DIR:${PYTHONPATH:-}"
 MSLOC_ROOT=$(cd "$TRACE_DIR/.." && pwd)
 MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_assets" && pwd)"}
 DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
-PROPOSAL_PATH=${PROPOSAL_PATH:-"$MSLOC_ASSETS/DeMamba/results/all_Class_4/eval_0125_train/predictions.json"}
+PROPOSAL_PATH=${PROPOSAL_PATH:?Set PROPOSAL_PATH to DeMamba predictions.json generated on the training split}
+BASE_CKPT=${BASE_CKPT:-"$MSLOC_ASSETS/Trace/ckpts/trace-uni"}
 
 WORLD_SIZE=${WORLD_SIZE:-1}
 NPROC_PER_NODE=${NPROC_PER_NODE:-1}
@@ -18,7 +19,12 @@ RANK=${RANK:-0}
 
 GLOBAL_BATCH_SIZE=4
 GRADIENT_ACCUMULATION_STEPS=2
-LOCAL_BATCH_SIZE=$(($GLOBAL_BATCH_SIZE/($WORLD_SIZE*$NPROC_PER_NODE*$GRADIENT_ACCUMULATION_STEPS)))
+DENOMINATOR=$(($WORLD_SIZE*$NPROC_PER_NODE*$GRADIENT_ACCUMULATION_STEPS))
+if [ "$GLOBAL_BATCH_SIZE" -lt "$DENOMINATOR" ] || [ $((GLOBAL_BATCH_SIZE % DENOMINATOR)) -ne 0 ]; then
+  echo "GLOBAL_BATCH_SIZE=$GLOBAL_BATCH_SIZE must be a positive multiple of WORLD_SIZE*NPROC_PER_NODE*GRADIENT_ACCUMULATION_STEPS=$DENOMINATOR" >&2
+  exit 2
+fi
+LOCAL_BATCH_SIZE=$(($GLOBAL_BATCH_SIZE/$DENOMINATOR))
 echo "LOCAL_BATCH_SIZE: $LOCAL_BATCH_SIZE"
 
 export TRANSFORMERS_OFFLINE=1
@@ -26,7 +32,7 @@ export WANDB_PROJECT=trace_vllava
 export NCCL_P2P_LEVEL=NVL
 export HCCL_BUFFSIZE=1024
 RUN_NAME=trace_vllava
-OUTP_DIR="$MSLOC_ASSETS/Trace/output"
+OUTP_DIR=${OUTP_DIR:-"$MSLOC_ASSETS/Trace/output/trace_vllava/ref2"}
 
 ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --nproc_per_node $NPROC_PER_NODE \
@@ -42,7 +48,7 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --tune_mm_mlp_adapter True \
     --tune_mm_embed_head True \
     --tune_lm_embed_head True \
-    --model_name_or_path "$MSLOC_ASSETS/Trace/ckpts/trace-uni" \
+    --model_name_or_path "$BASE_CKPT" \
     --data_path "$DATA_ROOT/annos/train_all_1209.json" \
     --data_folder "$DATA_ROOT/videos" \
     --train_mode ref2 \
@@ -60,7 +66,7 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --bf16 True \
     --tf32 False \
     --fp16 False \
-    --output_dir "${OUTP_DIR}/${WANDB_PROJECT}/ref2" \
+    --output_dir "$OUTP_DIR" \
     --num_train_epochs 2 \
     --per_device_train_batch_size $LOCAL_BATCH_SIZE \
     --per_device_eval_batch_size 4 \
