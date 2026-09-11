@@ -6,23 +6,17 @@ text silently turns malformed timestamps into ``real`` predictions.  The
 functions below are the single source of truth used by the replay builder,
 trainers and evaluation code.
 
-The module has no optional VLM dependency.  Explanation reward is only enabled
-when a caller supplies a *candidate-only* judge implementing ``ExplanationJudge``.
-This is intentional: text overlap with ``obj_caption`` is not evidence that an
-explanation is visible in the candidate video.
+The module has no optional VLM dependency. Explanation reward is enabled when
+a caller supplies a frozen scorer with a ``score`` method. The GRPO path uses a
+local reference-text scorer; OPD and the other rewards are unchanged.
 """
 
 from __future__ import annotations
 
-import abc
 import dataclasses
 import hashlib
 import math
 import re
-import json
-import shlex
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -292,122 +286,6 @@ class EvidenceCard:
 
 
 @dataclass(frozen=True)
-class ExplanationVerdict:
-    """Bounded output of a frozen candidate-only explanation judge."""
-
-    object_supported: float
-    anomaly_supported: float
-    boundary_consistent: float
-    hallucination: float
-    judge_id: str
-
-    def __post_init__(self) -> None:
-        for name in ("object_supported", "anomaly_supported", "boundary_consistent", "hallucination"):
-            value = getattr(self, name)
-            if not 0.0 <= value <= 1.0:
-                raise ValueError(f"{name} must lie in [0, 1], got {value}")
-
-    @property
-    def reward(self) -> float:
-        return max(-1.0, min(1.0, 0.4 * self.object_supported + 0.4 * self.anomaly_supported + 0.2 * self.boundary_consistent - 0.5 * self.hallucination))
-
-
-class ExplanationJudge(abc.ABC):
-    """Frozen VLM contract.  It must never receive a paired reference video.
-
-    ``evidence`` is the training-only reference explanation. It is needed to
-    score coverage of annotated content, but the judge must also inspect the
-    candidate video: reference-text overlap alone is not visual grounding.
-    The reference video and GT time segments are never sent to the judge.
-    """
-
-    @abc.abstractmethod
-    def score(
-        self,
-        *,
-        candidate_video: str,
-        proposal: Tuple[float, float],
-        predicted_segments: Sequence[Tuple[float, float]],
-        caption: str,
-        evidence: EvidenceCard,
-        sample_id: str,
-    ) -> ExplanationVerdict:
-        raise NotImplementedError
-
-
-class CommandExplanationJudge(ExplanationJudge):
-    """Adapter for a frozen local/remote VLM judge executed as a command.
-
-    The command is called without a shell as ``COMMAND --input in.json --output
-    out.json``. ``in.json`` contains candidate video, proposal, model output,
-    and a training-only reference evidence card extracted from annotations. The
-    judge must score both coverage of this card and visual support in the
-    candidate. It receives neither a reference video nor GT time segments.
-    The output must be one JSON object with the four bounded fields accepted by
-    :class:`ExplanationVerdict` and an optional ``judge_id``.
-    """
-
-    def __init__(self, command: str, timeout_seconds: int = 120):
-        if not command.strip():
-            raise ValueError("judge command must not be empty")
-        self.command = shlex.split(command)
-        self.timeout_seconds = timeout_seconds
-        self._cache: Dict[str, ExplanationVerdict] = {}
-
-    def score(self, *, candidate_video, proposal, predicted_segments, caption, evidence, sample_id):
-        payload = {
-            "sample_id": sample_id,
-            "candidate_video": candidate_video,
-            "proposal": list(proposal),
-            "predicted_segments": [list(x) for x in predicted_segments],
-            "caption": caption,
-            # The actor never sees this card. It supplies a reference answer to
-            # GRPO, while Qwen is instructed to require visual support too.
-            "reference_evidence": evidence.as_dict(),
-            "protocol": "candidate_only_v1",
-            "rubric": {
-                "object_supported": "Does the explanation identify an entity or region visibly relevant in the candidate video?",
-                "anomaly_supported": "Is the claimed anomaly visibly supported by the candidate video, rather than a generic assertion?",
-                "boundary_consistent": "Do the claimed visual changes occur within and near the model-predicted time segment(s)?",
-                "hallucination": "Does the explanation assert a visual fact that cannot be supported by the candidate video?",
-            },
-        }
-        cache_key = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-        with tempfile.TemporaryDirectory(prefix="trace_evidence_judge_") as directory:
-            input_path = f"{directory}/input.json"
-            output_path = f"{directory}/output.json"
-            with open(input_path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-            completed = subprocess.run(
-                [*self.command, "--input", input_path, "--output", output_path],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    f"Explanation judge failed with exit code {completed.returncode}: {completed.stderr[-1000:]}"
-                )
-            try:
-                with open(output_path, "r", encoding="utf-8") as handle:
-                    result = json.load(handle)
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RuntimeError("Explanation judge did not create valid JSON output") from exc
-        verdict = ExplanationVerdict(
-            object_supported=float(result["object_supported"]),
-            anomaly_supported=float(result["anomaly_supported"]),
-            boundary_consistent=float(result["boundary_consistent"]),
-            hallucination=float(result["hallucination"]),
-            judge_id=str(result.get("judge_id", "external_candidate_only_judge")),
-        )
-        self._cache[cache_key] = verdict
-        return verdict
-
-
-@dataclass(frozen=True)
 class RewardConfig:
     localization_weight: float = 1.0
     explanation_weight: float = 0.0
@@ -427,6 +305,7 @@ class RewardBreakdown:
     matched_boundary: float = 0.0
     explanation_enabled: bool = False
     judge_id: Optional[str] = None
+    explanation_details: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -441,7 +320,7 @@ def score_trace_output(
     evidence: Optional[EvidenceCard],
     sample_id: str,
     config: RewardConfig,
-    explanation_judge: Optional[ExplanationJudge] = None,
+    explanation_judge: Optional[Any] = None,
 ) -> RewardBreakdown:
     """The three rewards used by the proposal-level GRPO stage.
 
@@ -480,6 +359,7 @@ def score_trace_output(
 
     explanation = 0.0
     judge_id: Optional[str] = None
+    explanation_details: Dict[str, Any] = {}
     explanation_enabled = (
         positive
         and parsed.status == VALID_EVENT
@@ -490,8 +370,7 @@ def score_trace_output(
     if explanation_enabled:
         if explanation_judge is None:
             raise RuntimeError(
-                "Explanation reward was enabled without a candidate-only frozen judge and evidence card. "
-                "Do not substitute text similarity: set explanation_weight=0 until a judge is supplied."
+                "Explanation reward was enabled without a frozen scorer and evidence card."
             )
         verdict = explanation_judge.score(
             candidate_video=candidate_video,
@@ -503,6 +382,8 @@ def score_trace_output(
         )
         explanation = verdict.reward
         judge_id = verdict.judge_id
+        if hasattr(verdict, "as_dict"):
+            explanation_details = verdict.as_dict()
 
     total = (
         config.localization_weight * localization
@@ -518,6 +399,7 @@ def score_trace_output(
         matched_boundary=matched_boundary,
         explanation_enabled=explanation_enabled,
         judge_id=judge_id,
+        explanation_details=explanation_details,
     )
 
 

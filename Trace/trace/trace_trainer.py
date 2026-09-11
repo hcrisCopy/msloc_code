@@ -526,9 +526,8 @@ class TraceGRPOTrainer(TraceTrainer):
         against the first annotation regardless of which event was localized
         makes the explanation signal incorrect.  Dataset construction keeps
         ``target_segments`` and ``evidence_items`` index-aligned; select the
-        highest-IoU matched target. Whether its content is visually supported
-        is judged online by frozen Qwen, not by a separately required binary
-        audit file.
+        highest-IoU matched target, then compare its annotation evidence with
+        the generated explanation.
         """
         if parsed.status != "valid_event" or len(target_segments) != len(evidence_items):
             return None
@@ -607,6 +606,14 @@ class TraceGRPOTrainer(TraceTrainer):
             "grpo_valid_event_rate": sum(p.status == "valid_event" for p in parsed) / len(parsed),
             "grpo_format_failure_rate": sum(p.status == "format_failure" for p in parsed) / len(parsed),
         }
+        detail_keys = (
+            "graph_precision", "graph_recall", "graph_f1", "contradiction",
+            "generic_penalty", "repetition_penalty", "length_penalty",
+        )
+        details = [reward.explanation_details for reward in rewards if reward.explanation_details]
+        for key in detail_keys:
+            values = [float(detail[key]) for detail in details if key in detail]
+            metrics[f"grpo_text_{key}"] = sum(values) / len(values) if values else 0.0
         policy_loss = torch.stack(terms).mean() if terms else None
         kl_loss = torch.stack(kls).mean() if kls else None
         return policy_loss, kl_loss, metrics

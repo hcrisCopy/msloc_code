@@ -76,13 +76,13 @@ class ClassFeatureBank(nn.Module):
         return self.class_features
 
 
-# Default location of the pre-computed class-name feature file (in MSLoc_assets/Trace/).
+# Default location of the pre-computed class-name feature file (in MSLoc_data/Trace/).
 # Override with the CLASS_FEATURE_PATH env var.
 import os as _os
 DEFAULT_CLASS_FEATURE_PATH = _os.environ.get(
     'CLASS_FEATURE_PATH',
     _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
-                  '..', '..', 'MSLoc_assets', 'Trace', 'class_features_bge.pt')
+                  '..', 'MSLoc_data', 'Trace', 'class_features_bge.pt')
 )
 
 

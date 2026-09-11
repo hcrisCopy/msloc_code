@@ -5,7 +5,7 @@ set -euo pipefail
 TRACE_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 export PYTHONPATH="$TRACE_DIR:${PYTHONPATH:-}"
 MSLOC_ROOT=$(cd "$TRACE_DIR/.." && pwd)
-MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_assets" && pwd)"}
+MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_data" && pwd)"}
 DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 REPLAY_PATH=${REPLAY_PATH:?Set REPLAY_PATH to normalized replay with resolved real references}
 SFT_CKPT=${SFT_CKPT:?Set SFT_CKPT to the candidate-only ref2-SFT checkpoint}

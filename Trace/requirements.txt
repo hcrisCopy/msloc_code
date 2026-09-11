@@ -26,6 +26,7 @@ timm==0.6.13
 # install it because old bitsandbytes wheels require a system CUDA toolkit.
 safetensors>=0.4.0
 huggingface-hub>=0.23.0
+tqdm>=4.66.0
 pillow>=9.0.0
 pydantic<2,>=1
 markdown2[all]

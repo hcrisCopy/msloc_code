@@ -18,7 +18,7 @@ def load_module(name, relative):
 
 opd = load_module("opd_grpo_test", "trace/opd_grpo.py")
 replay = load_module("replay_test", "scripts/build_opd_grpo_replay.py")
-qwen_judge = load_module("qwen_judge_test", "scripts/qwen3_vl_explanation_judge.py")
+text_reward = load_module("text_reward_test", "trace/text_explanation_reward.py")
 
 
 class OpdGrpoTests(unittest.TestCase):
@@ -115,23 +115,30 @@ class OpdGrpoTests(unittest.TestCase):
         self.assertFalse(records[1]["is_positive"])
         self.assertEqual(records[1]["reference"]["reference_segment"], [6.0, 7.0])
 
-    def test_qwen_judge_is_candidate_only_and_samples_predicted_boundaries(self):
-        payload = {
-            "sample_id": "unit",
-            "candidate_video": "candidate.mp4",
-            "proposal": [10.0, 20.0],
-            "predicted_segments": [[2.0, 4.0]],
-            "caption": "the mouth flickers",
-            "protocol": "candidate_only_v1",
-            "rubric": {},
-            "reference_evidence": {"object_caption": "mouth flickers"},
-        }
-        qwen_judge.validate_candidate_only_payload(payload)
-        times = qwen_judge.requested_frame_times(payload, max_frames=8)
-        self.assertIn(12.0, times)
-        self.assertIn(14.0, times)
-        with self.assertRaises(ValueError):
-            qwen_judge.validate_candidate_only_payload({**payload, "evidence": {"object_caption": "GT text"}})
+    def test_reference_text_reward_matches_evidence_and_penalises_generic_text(self):
+        evidence = opd.EvidenceCard(
+            object_caption="The mouth flickers and changes shape unnaturally.",
+            object_class="Object Flickering/Instantaneous Changes",
+        )
+        judge = text_reward.ReferenceTextExplanationJudge(mode="lexical")
+        matched = judge.score(caption="The mouth flickers with unnatural shape changes.", evidence=evidence)
+        generic = judge.score(caption="The video is fake.", evidence=evidence)
+        self.assertGreater(matched.graph_f1, generic.graph_f1)
+        self.assertGreater(matched.reward, generic.reward)
+        self.assertEqual(generic.generic_penalty, 1.0)
+
+    def test_text_reward_uses_object_and_boundary_facts(self):
+        evidence = opd.EvidenceCard(
+            object_caption="The hand is deformed.",
+            start_caption="The deformation appears abruptly.",
+            end_caption="The hand returns to normal.",
+            object_class="Object Deformation",
+            start_class="abrupt onset",
+            end_class="abrupt offset",
+        )
+        facts = text_reward.evidence_facts(evidence)
+        self.assertEqual([fact.relation for fact in facts], ["object_anomaly", "onset", "offset"])
+        self.assertEqual([fact.weight for fact in facts], [2.0, 1.0, 1.0])
 
 
 if __name__ == "__main__":

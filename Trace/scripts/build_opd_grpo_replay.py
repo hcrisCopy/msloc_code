@@ -15,6 +15,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from tqdm.auto import tqdm
+
 
 def video_id(item: Mapping[str, Any]) -> Optional[str]:
     return item.get("video_path") or item.get("video") or item.get("image_id")
@@ -210,10 +212,12 @@ def build_records(
     evidence_audit: Optional[Mapping[str, Mapping[str, Any]]] = None,
     paired_only: bool = False,
     video_root: Optional[Path] = None,
+    show_progress: bool = False,
 ) -> List[Dict[str, Any]]:
     gt_by_video = {video_id(item): item for item in gt if video_id(item)}
     records: List[Dict[str, Any]] = []
-    for proposal_source in proposals:
+    proposal_iter = tqdm(proposals, desc="Building replay proposals", unit="video", disable=not show_progress)
+    for proposal_source in proposal_iter:
         candidate = video_id(proposal_source)
         gt_item = gt_by_video.get(candidate)
         if not candidate or not gt_item:
@@ -295,6 +299,7 @@ def main() -> None:
     parser.add_argument("--near-negative-seconds", type=float, default=1.0, help="Gap threshold for near-hard-negative replay bucket")
     parser.add_argument("--evidence-audit", help="Optional candidate-observability diagnostic keyed as video::start-end; it does not gate GRPO reward")
     parser.add_argument("--max-records", type=int, default=0, help="Positive value keeps only the first N constructed replay records (debug only)")
+    parser.add_argument("--clean", action="store_true", help="Replace an existing output manifest")
     args = parser.parse_args()
     if args.paired_only and not args.video_root:
         parser.error("--paired-only requires --video-root so missing _real.mp4 counterparts can be excluded")
@@ -317,6 +322,7 @@ def main() -> None:
         gt, proposals, reference_map, args.near_negative_seconds, evidence_audit,
         paired_only=args.paired_only,
         video_root=Path(args.video_root).resolve() if args.video_root else None,
+        show_progress=True,
     )
     if args.max_records < 0:
         parser.error("--max-records must be non-negative")
@@ -350,9 +356,13 @@ def main() -> None:
         },
     }
     output_path = Path(args.output)
+    if output_path.exists() and not args.clean:
+        raise FileExistsError(f"{output_path} already exists; pass --clean to replace it")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
+    temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as handle:
         json.dump(output, handle, ensure_ascii=False, indent=2)
+    temporary_path.replace(output_path)
     print(json.dumps(output["statistics"], ensure_ascii=False))
 
 

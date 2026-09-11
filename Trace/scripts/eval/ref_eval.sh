@@ -11,7 +11,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 TRACE_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 export PYTHONPATH="$TRACE_DIR:${PYTHONPATH:-}"
 MSLOC_ROOT=$(cd "$TRACE_DIR/.." && pwd)
-MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_assets" && pwd)"}
+MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_data" && pwd)"}
 DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 
 # ============================ Configurable parameters ============================

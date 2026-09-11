@@ -54,7 +54,8 @@ sys.path.insert(0, repo_root)
 from trace import conversation as conversation_lib
 from trace.constants import NUM_FRAMES, IGNORE_INDEX, MMODAL_TOKEN_INDEX, DEFAULT_MMODAL_TOKEN, DEFAULT_MMODAL_START_TOKEN, DEFAULT_MMODAL_END_TOKEN, MMODAL_INDEX_TOKEN
 from trace.trace_trainer import FrozenTrainableReference, TraceTrainer, TraceGRPOTrainer, TraceOPDTrainer
-from trace.opd_grpo import CommandExplanationJudge, PAIR_REFERENCE_INSTRUCTION
+from trace.opd_grpo import PAIR_REFERENCE_INSTRUCTION
+from trace.text_explanation_reward import ReferenceTextExplanationJudge
 from trace.model import *
 from trace.mm_utils import tokenizer_MMODAL_token, tokenizer_image_token, expand2square, process_video, process_image, tokenizer_MMODAL_token_all, process_video_ref_split, make_vertical_reference_pair
 import trace.mm_utils as mm_utils_module
@@ -210,7 +211,12 @@ class TrainingArguments(transformers.TrainingArguments):
     grpo_explanation_iou_gate: float = field(default=0.3)
     grpo_boundary_tolerance: float = field(default=1.0)
     grpo_structure_aware: bool = field(default=True)
-    grpo_explanation_judge_command: Optional[str] = field(default=None, metadata={"help": "Trusted command implementing the documented candidate-only VLM judge JSON contract."})
+    grpo_text_reward_mode: str = field(default="lexical", metadata={"help": "Reference-text explanation scorer: lexical or nli."})
+    grpo_text_nli_model_path: Optional[str] = field(default=None, metadata={"help": "Local frozen NLI model directory; required only for nli mode."})
+    grpo_text_nli_device: str = field(default="cpu")
+    grpo_text_nli_batch_size: int = field(default=32)
+    grpo_text_max_words: int = field(default=80)
+    grpo_text_require_candidate_observable: bool = field(default=False)
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -788,10 +794,8 @@ class LazySupervisedDataset(Dataset):
                     candidate = record.get("candidate_video")
                     if not candidate or not isinstance(proposal, list) or len(proposal) != 2:
                         continue
-                    # Preserve optional replay metadata alongside the raw
-                    # annotation for backward-compatible analysis. It is not a
-                    # hard gate for explanation reward: Qwen evaluates visual
-                    # support online for every matched event.
+                    # Preserve optional observability metadata alongside the
+                    # raw annotation for text-reward audits.
                     annotations = []
                     for target in record.get("targets", []):
                         if not target.get("annotation"):
@@ -1202,9 +1206,8 @@ class LazySupervisedDataset(Dataset):
                             "end_caption": "" if _round4 else _ed.get("bnd_caption", ""),
                             "end_class": "" if _round4 else _ed.get("bnd_class", ""),
                             "manipulation_type": "spatio-temporal" if _round4 else "temporal",
-                            # Optional diagnostic metadata; Qwen's online
-                            # candidate-frame judgment, not this bit, decides
-                            # visual support for explanation reward.
+                            # Optional diagnostic metadata for stricter
+                            # candidate-observability experiments.
                             "candidate_observable": bool(ann.get("candidate_observable", False)),
                         })
                         # Keep all four per-event lists in the same order.  In
@@ -2252,16 +2255,23 @@ def train(attn_implementation="eager"):
             raise ValueError("GRPO must use train_mode=ref2 and a normalized --replay_path built from real stage-1 proposals")
         if training_args.grpo_group_size < 2:
             raise ValueError("GRPO requires --grpo_group_size >= 2")
-        if training_args.grpo_explanation_weight > 0 and not training_args.grpo_explanation_judge_command:
-            raise ValueError(
-                "Explanation reward requires --grpo_explanation_judge_command for a frozen candidate-only VLM judge. "
-                "Set the weight to 0 for the localization+format warm-up; do not fall back to text similarity."
-            )
+        if training_args.grpo_text_reward_mode not in {"lexical", "nli"}:
+            raise ValueError("--grpo_text_reward_mode must be lexical or nli")
+        if (training_args.grpo_explanation_weight > 0
+                and training_args.grpo_text_reward_mode == "nli"
+                and not training_args.grpo_text_nli_model_path):
+            raise ValueError("NLI text reward requires --grpo_text_nli_model_path pointing to a local frozen model")
         reference_model = FrozenTrainableReference(model).eval()
-        explanation_judge = (
-            CommandExplanationJudge(training_args.grpo_explanation_judge_command)
-            if training_args.grpo_explanation_weight > 0 else None
-        )
+        explanation_judge = None
+        if training_args.grpo_explanation_weight > 0:
+            explanation_judge = ReferenceTextExplanationJudge(
+                mode=training_args.grpo_text_reward_mode,
+                nli_model_path=training_args.grpo_text_nli_model_path,
+                nli_device=training_args.grpo_text_nli_device,
+                nli_batch_size=training_args.grpo_text_nli_batch_size,
+                max_words=training_args.grpo_text_max_words,
+                require_candidate_observable=training_args.grpo_text_require_candidate_observable,
+            )
         trainer = TraceGRPOTrainer(
             model=model,
             tokenizer=tokenizer,
