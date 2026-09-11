@@ -53,7 +53,7 @@ sys.path.insert(0, repo_root)
 
 from trace import conversation as conversation_lib
 from trace.constants import NUM_FRAMES, IGNORE_INDEX, MMODAL_TOKEN_INDEX, DEFAULT_MMODAL_TOKEN, DEFAULT_MMODAL_START_TOKEN, DEFAULT_MMODAL_END_TOKEN, MMODAL_INDEX_TOKEN
-from trace.trace_trainer import TraceTrainer, TraceGRPOTrainer, TraceOPDTrainer
+from trace.trace_trainer import FrozenTrainableReference, TraceTrainer, TraceGRPOTrainer, TraceOPDTrainer
 from trace.opd_grpo import CommandExplanationJudge, PAIR_REFERENCE_INSTRUCTION
 from trace.model import *
 from trace.mm_utils import tokenizer_MMODAL_token, tokenizer_image_token, expand2square, process_video, process_image, tokenizer_MMODAL_token_all, process_video_ref_split, make_vertical_reference_pair
@@ -2257,8 +2257,7 @@ def train(attn_implementation="eager"):
                 "Explanation reward requires --grpo_explanation_judge_command for a frozen candidate-only VLM judge. "
                 "Set the weight to 0 for the localization+format warm-up; do not fall back to text similarity."
             )
-        reference_model = copy.deepcopy(model).eval()
-        reference_model.requires_grad_(False)
+        reference_model = FrozenTrainableReference(model).eval()
         explanation_judge = (
             CommandExplanationJudge(training_args.grpo_explanation_judge_command)
             if training_args.grpo_explanation_weight > 0 else None
@@ -2328,15 +2327,12 @@ def train(attn_implementation="eager"):
         ):
             if getattr(training_args, name) < 0:
                 raise ValueError(f"--{name} must be non-negative")
-        teacher_config = copy.deepcopy(model.config)
-        teacher_model = TraceMistralForCausalLM.from_pretrained(
-            training_args.opd_teacher_model_path,
-            config=teacher_config,
-            cache_dir=training_args.cache_dir,
-            torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
-        teacher_model.config.use_cache = False
-        teacher_model.requires_grad_(False)
+        if os.path.normcase(os.path.abspath(training_args.opd_teacher_model_path)) != os.path.normcase(os.path.abspath(model_args.model_name_or_path)):
+            raise ValueError(
+                "OPD's frozen teacher must be the same SFT checkpoint used to initialize the student. "
+                "This allows the immutable backbone to be shared without changing teacher logits."
+            )
+        teacher_model = FrozenTrainableReference(model).eval()
         trainer = TraceOPDTrainer(
             model=model,
             tokenizer=tokenizer,

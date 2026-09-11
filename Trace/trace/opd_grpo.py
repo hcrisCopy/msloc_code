@@ -556,13 +556,14 @@ def action_component_masks(token_ids: Sequence[int], token_spec: TraceTokenSpec)
     empty.
     """
 
-    masks = {"localization": [], "format": [], "explanation": []}
+    masks = {"localization": [], "format": [], "explanation": [], "total": []}
     for token_id in token_ids:
         kind = token_spec.kind(int(token_id))
         structural = kind in {"time", "score"} or int(token_id) == token_spec.text_sync_id
         masks["localization"].append(1.0 if kind == "time" or int(token_id) == token_spec.text_sync_id else 0.0)
         masks["format"].append(1.0 if structural else 0.0)
         masks["explanation"].append(1.0 if kind == "text" and int(token_id) != token_spec.text_sync_id else 0.0)
+        masks["total"].append(1.0)
     return masks
 
 

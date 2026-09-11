@@ -14,6 +14,7 @@ STUDENT_CKPT=${STUDENT_CKPT:?Set STUDENT_CKPT to the ref2-SFT checkpoint}
 TEACHER_CACHE=${TEACHER_CACHE:?Set TEACHER_CACHE to the JSON produced by precheck_opd_teacher.py}
 OUT_DIR=${OUT_DIR:-"$MSLOC_ASSETS/Trace/output/opd_student"}
 REPORT_TO=${REPORT_TO:-none}
+DEEPSPEED_CONFIG="$TRACE_DIR/scripts/zero2.json"
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
@@ -34,7 +35,7 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
 fi
 
 torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
-  --deepspeed "$TRACE_DIR/scripts/zero3.json" \
+  --deepspeed "$DEEPSPEED_CONFIG" \
   --version v1_mistral --vision_tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
   --mm_projector_type spatial_slot --tune_mm_mlp_adapter True --tune_mm_embed_head True --tune_lm_embed_head True \
   --model_name_or_path "$STUDENT_CKPT" --opd_teacher_model_path "$STUDENT_CKPT" \

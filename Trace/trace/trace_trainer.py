@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Sampler
+from torch.nn.utils.stateless import functional_call
 
 from transformers import Trainer
 from transformers.trainer import (
@@ -28,6 +29,7 @@ from .opd_grpo import (
     VALID_NO_EVENT,
     action_component_masks,
     component_advantages,
+    match_segments,
     parse_trace_tokens,
     score_trace_output,
     temporal_iou,
@@ -295,6 +297,53 @@ def _unwrap_trace_model(model):
     return getattr(model, "module", model)
 
 
+class FrozenTrainableReference:
+    """Frozen policy that shares the actor's immutable backbone.
+
+    TRACE freezes its backbone and trains only the multimodal projector,
+    embeddings, and output heads. Keeping a second complete 7B model solely
+    for reference logits exhausts a 40 GiB GPU. A stateless call substitutes
+    snapshots of just the trainable parameters while safely sharing every
+    parameter that cannot change.
+    """
+
+    def __init__(self, model):
+        self._actor = model
+        self._state = {
+            name: parameter.detach().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
+        if not self._state:
+            raise ValueError("The frozen reference has no trainable actor parameters to snapshot")
+
+    def __getattr__(self, name):
+        return getattr(self._actor, name)
+
+    def eval(self):
+        self._actor.eval()
+        return self
+
+    def train(self, mode=True):
+        self._actor.train(mode)
+        return self
+
+    def requires_grad_(self, requires_grad=False):
+        # Snapshots are detached tensors. Do not freeze the actor when the
+        # trainer calls requires_grad_(False) on this reference.
+        return self
+
+    def parameters(self):
+        return iter(self._state.values())
+
+    def to(self, device):
+        self._state = {name: tensor.to(device) for name, tensor in self._state.items()}
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return functional_call(self._actor, self._state, args, kwargs, strict=False)
+
+
 class TraceGRPOTrainer(TraceTrainer):
     """Proposal-level GRPO for TRACE's mixed text/time/score vocabulary.
 
@@ -529,8 +578,8 @@ class TraceGRPOTrainer(TraceTrainer):
             if not response:
                 continue
             old_logprobs, _, _ = self._trace_policy_terms(model, prompt, response, video, modal, timestamps, requires_grad=False)
-            current_logprobs, kinds, current_logits = self._trace_policy_terms(model, prompt, response, video, modal, timestamps, requires_grad=True)
             _, _, reference_logits = self._trace_policy_terms(reference, prompt, response, video, modal, timestamps, requires_grad=False)
+            current_logprobs, kinds, current_logits = self._trace_policy_terms(model, prompt, response, video, modal, timestamps, requires_grad=True)
             masks = action_component_masks(response, spec)
             component_to_advantage = advantages if self.args.grpo_structure_aware else {"total": advantages["total"]}
             for component, component_advantage in component_to_advantage.items():

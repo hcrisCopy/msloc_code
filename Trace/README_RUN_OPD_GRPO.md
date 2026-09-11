@@ -139,13 +139,19 @@ PYTHONPATH="$REPO_ROOT/Trace:$PYTHONPATH" python Trace/scripts/precheck_opd_teac
 export TEACHER_CACHE="$PRECHECK_SMOKE"
 ~~~
 
-若完整预检返回非零，停止 OPD，检查预检 JSON 的 candidate 与 paired 指标；不可
+小样本 smoke 只验证模型加载、candidate/paired 生成、解析和缓存写入。若 2--3 条
+样本全部 `teacher_reliable=false`，仍可继续执行 OPD/GRPO 调试命令检查程序链路，
+但此时 OPD 的 reverse-KL 为 0，调试结果不代表方法有效。
+
+正式完整预检若返回非零，必须停止 OPD，检查预检 JSON 的 candidate 与 paired 指标；不可
 通过降低阈值强行训练。
 
 ## 5. OPD
 
 学生只看 candidate，冻结教师仅在 KL 打分时看上下对照。每个 batch 保留 SFT loss；
 OPD 的 reverse KL 仅计算定位结构 token。
+OPD 使用 ZeRO-2；冻结教师与学生共享不训练的主干，只保存教师侧可训练层的冻结快照，
+避免两套完整 7B 模型占满显存。
 
 默认动态权重：错误拒答 1.0；正例其他错误和负例乱报 0.8；正确正例和正确负例
 anchor 0.2。可靠正例中 25% 在前 16 个结构 token 使用 guided rollout。
@@ -174,9 +180,11 @@ export OPD_CKPT="$OPD_OUT"
 中断后在原命令中移除 `CLEAN=1` 并加入 `RESUME_FROM_CHECKPOINT=auto`。
 
 日志中应出现 opd_reverse_kl、opd_false_refusal_rollouts 与
-opd_reliable_teacher_rate。可靠教师比例接近零时，不应进入 GRPO。
+opd_reliable_teacher_rate。正式实验中可靠教师比例接近零时，不应进入 GRPO。
 
-## 6. GRPO 冒烟测试：不调用 Qwen
+## 6. GRPO 冒烟测试：不调用 Qwen（全量实验不需要跑）
+
+GRPO 使用相同的共享主干冻结参考，并使用 ZeRO-2；ref2 SFT 仍使用 ZeRO-3。
 
 先验证 candidate-only GRPO rollout、定位奖励与格式奖励。EXPLANATION_WEIGHT=0
 时不要求 Qwen endpoint，且不会调用评审器。

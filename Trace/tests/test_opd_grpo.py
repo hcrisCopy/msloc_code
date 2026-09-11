@@ -73,6 +73,13 @@ class OpdGrpoTests(unittest.TestCase):
                 config=opd.RewardConfig(explanation_weight=0.5), explanation_judge=None,
             )
 
+    def test_component_masks_cover_total_without_changing_component_masks(self):
+        tokens = [self.spec.text_sync_id, *self.time_ids("1"), 7]
+        masks = opd.action_component_masks(tokens, self.spec)
+        self.assertEqual(masks["total"], [1.0, 1.0, 1.0])
+        self.assertEqual(masks["localization"], [1.0, 1.0, 0.0])
+        self.assertEqual(masks["explanation"], [0.0, 0.0, 1.0])
+
     def test_replay_keeps_boundary_and_object_annotations(self):
         gt = [{"video_path": "candidate.mp4", "annotations": [{
             "segment": [2.0, 5.0], "combine_dir": "Round3",

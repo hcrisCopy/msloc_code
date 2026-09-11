@@ -23,6 +23,7 @@ if [[ "$EXPLANATION_WEIGHT" != "0" && "$EXPLANATION_WEIGHT" != "0.0" && "$EXPLAN
 fi
 OUT_DIR=${OUT_DIR:-"$MSLOC_ASSETS/Trace/output/grpo"}
 REPORT_TO=${REPORT_TO:-none}
+DEEPSPEED_CONFIG="$TRACE_DIR/scripts/zero2.json"
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
@@ -43,7 +44,7 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
 fi
 
 torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
-  --deepspeed "$TRACE_DIR/scripts/zero3.json" \
+  --deepspeed "$DEEPSPEED_CONFIG" \
   --version v1_mistral --vision_tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
   --mm_projector_type spatial_slot --tune_mm_mlp_adapter True --tune_mm_embed_head True --tune_lm_embed_head True \
   --model_name_or_path "$OPD_CKPT" --data_path "$DATA_ROOT/annos/train_all_1209.json" --data_folder "$DATA_ROOT/videos" \
