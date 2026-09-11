@@ -287,6 +287,33 @@ def build_records(
     return records
 
 
+def stratified_debug_records(records: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """Select a tiny branch-covering subset without changing formal data."""
+    if limit <= 0 or len(records) <= limit:
+        return records
+    selected: List[Dict[str, Any]] = []
+    used = set()
+    priorities = (
+        lambda row: bool(row.get("is_positive")),
+        lambda row: not row.get("is_positive") and row.get("replay_bucket") != "real_false_positive",
+        lambda row: row.get("replay_bucket") == "real_false_positive",
+    )
+    for predicate in priorities:
+        for index, record in enumerate(records):
+            if index not in used and predicate(record):
+                selected.append(record)
+                used.add(index)
+                break
+        if len(selected) == limit:
+            return selected
+    for index, record in enumerate(records):
+        if index not in used:
+            selected.append(record)
+            if len(selected) == limit:
+                break
+    return selected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gt", required=True, help="TASLE training annotation JSON")
@@ -299,6 +326,7 @@ def main() -> None:
     parser.add_argument("--near-negative-seconds", type=float, default=1.0, help="Gap threshold for near-hard-negative replay bucket")
     parser.add_argument("--evidence-audit", help="Optional candidate-observability diagnostic keyed as video::start-end; it does not gate GRPO reward")
     parser.add_argument("--max-records", type=int, default=0, help="Positive value keeps only the first N constructed replay records (debug only)")
+    parser.add_argument("--stratified-debug", action="store_true", help="With --max-records, prioritize positive, fake-negative and real-false-positive branches")
     parser.add_argument("--clean", action="store_true", help="Replace an existing output manifest")
     args = parser.parse_args()
     if args.paired_only and not args.video_root:
@@ -327,7 +355,10 @@ def main() -> None:
     if args.max_records < 0:
         parser.error("--max-records must be non-negative")
     if args.max_records > 0:
-        records = records[:args.max_records]
+        records = (
+            stratified_debug_records(records, args.max_records)
+            if args.stratified_debug else records[:args.max_records]
+        )
         print(f"Debug replay limit active: using {len(records)} records.")
     if args.paired_only and not records:
         raise SystemExit(

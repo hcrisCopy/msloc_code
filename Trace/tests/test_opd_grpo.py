@@ -126,6 +126,16 @@ class OpdGrpoTests(unittest.TestCase):
         self.assertEqual(records[0]["replay_bucket"], "real_false_positive")
         self.assertIsNone(records[0]["reference"])
 
+    def test_stratified_debug_covers_reward_branches(self):
+        records = [
+            {"id": "p", "is_positive": True, "replay_bucket": "positive"},
+            {"id": "p2", "is_positive": True, "replay_bucket": "positive"},
+            {"id": "n", "is_positive": False, "replay_bucket": "near_hard_negative"},
+            {"id": "r", "is_positive": False, "replay_bucket": "real_false_positive"},
+        ]
+        selected = replay.stratified_debug_records(records, 3)
+        self.assertEqual([row["id"] for row in selected], ["p", "n", "r"])
+
     def test_reference_text_reward_matches_evidence_and_penalises_generic_text(self):
         evidence = opd.EvidenceCard(
             object_caption="The mouth flickers and changes shape unnaturally.",

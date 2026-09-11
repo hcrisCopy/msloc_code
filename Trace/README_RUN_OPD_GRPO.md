@@ -13,7 +13,7 @@ source Trace/scripts/setup_opd_grpo_env.sh
 ```
 
 训练命令用 `CLEAN=1` 清理对应输出目录。中断恢复时移除 `CLEAN=1`，加入
-`RESUME_FROM_CHECKPOINT=auto`。训练与评测均显示 tqdm 进度。
+`RESUME_FROM_CHECKPOINT=auto`。所有 `*_SMOKE` 变量和目录仅用于小样本，不能用于正式实验。
 
 ## 1. 生成训练集 proposal
 
@@ -31,7 +31,9 @@ export STAGE1_TEST_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval/predictions.
 小样本：
 
 ```bash
-python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --max-eval-videos 3 --num-workers 0 --device-ids 0 --val-batch-size 1 --save-progress --cache-data --clean
+python Trace/scripts/build_smoke_annotations.py --input ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --output ../MSLoc_data/data/Tasle-CoT-10K/annos/train_smoke.json --fake 2 --real 5 --clean
+python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train_smoke --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_smoke.json --num-workers 0 --device-ids 0 --val-batch-size 1 --save-progress --cache-data --clean
+export STAGE1_SMOKE_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval_train_smoke/predictions.json
 ```
 
 DeMamba 评测续跑：移除 `--clean`，加入 `--resume`。
@@ -50,7 +52,7 @@ export SFT_CKPT="$EXP_ROOT/ref2_sft"
 
 ```bash
 export SFT_SMOKE="$EXP_ROOT/ref2_sft_smoke"
-PROPOSAL_PATH="$STAGE1_TRAIN_PROPOSALS" BASE_CKPT="$TRACE_BASE" OUTP_DIR="$SFT_SMOKE" MAX_SAMPLES=3 GLOBAL_BATCH_SIZE=1 GRAD_ACCUM=1 EPOCHS=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 bash Trace/scripts/train/ref2.sh
+PROPOSAL_PATH="$STAGE1_SMOKE_PROPOSALS" BASE_CKPT="$TRACE_BASE" OUTP_DIR="$SFT_SMOKE" MAX_SAMPLES=3 GLOBAL_BATCH_SIZE=1 GRAD_ACCUM=1 EPOCHS=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 bash Trace/scripts/train/ref2.sh
 ```
 
 ## 3. 构建 OPD/GRPO replay
@@ -69,8 +71,8 @@ python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$S
 ```bash
 export OPD_REPLAY_SMOKE="$EXP_ROOT/opd_paired_replay_smoke.json"
 export GRPO_REPLAY_SMOKE="$EXP_ROOT/grpo_candidate_replay_smoke.json"
-python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --paired-only --video-root "$VIDEO_ROOT" --require-reference --max-records 3 --output "$OPD_REPLAY_SMOKE" --clean
-python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --max-records 3 --output "$GRPO_REPLAY_SMOKE" --clean
+python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_SMOKE_PROPOSALS" --paired-only --video-root "$VIDEO_ROOT" --require-reference --max-records 3 --stratified-debug --output "$OPD_REPLAY_SMOKE" --clean
+python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_SMOKE_PROPOSALS" --max-records 3 --stratified-debug --output "$GRPO_REPLAY_SMOKE" --clean
 ```
 
 ## 4. 冻结 paired teacher 预检
