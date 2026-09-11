@@ -6,6 +6,9 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import pandas as pd
+import hashlib
+import shutil
+from pathlib import Path
 from dataloader import generate_dataset_loader_from_json
 
 import models
@@ -104,7 +107,9 @@ def evaluate_trained_model(cfg, model_path, output_dir, device='cuda', device_id
     
     # Build the dataloaders.
     print("******* Building dataloaders *******")
-    _, val_loader, test_fake_segments = generate_dataset_loader_from_json(cfg)
+    _, val_loader, test_fake_segments = generate_dataset_loader_from_json(
+        cfg, evaluation_only=bool(cfg.get('evaluation_only', False))
+    )
     
     # Detect binary mode.
     is_binary = cfg.get('mode', '') == 'binary'
@@ -124,6 +129,8 @@ def evaluate_trained_model(cfg, model_path, output_dir, device='cuda', device_id
     # Read the original test JSON.
     with open(cfg['test_json_path'], 'r', encoding='utf-8') as f:
         test_json_data = json.load(f)
+    if cfg.get('max_eval_videos') is not None:
+        test_json_data = test_json_data[:cfg['max_eval_videos']]
         
     final_results = []
     
@@ -268,6 +275,17 @@ def main():
     parser.add_argument('--device', default='cuda', help='Device to use (cuda only for the current evaluator).')
     parser.add_argument('--device-ids', default='0', help='CUDA device IDs: 0 for one GPU, or 0,1,2,3,4,5,6,7 for eight GPUs')
     parser.add_argument('--val-batch-size', type=int, default=None, help='Optional override for cfg.val_batch_size')
+    parser.add_argument('--anno-file', default=None,
+                        help='Override cfg.test_json_path, e.g. run proposal inference on the training split')
+    parser.add_argument('--max-eval-videos', type=int, default=None,
+                        help='Use only the first N videos and write only those videos (debug only)')
+    parser.add_argument('--num-workers', type=int, default=None,
+                        help='Optional DataLoader worker override; use 0 when debugging')
+    parser.add_argument('--resume', action='store_true', help='Resume an interrupted evaluation from its progress file')
+    parser.add_argument('--clean', action='store_true', help='Remove this output directory\'s known evaluation products and caches first')
+    parser.add_argument('--save-progress', action='store_true', help='Save batch-level evaluation progress for later --resume')
+    parser.add_argument('--cache-data', action='store_true', help='Cache constructed video windows for reuse')
+    parser.add_argument('--dataset-base-path', default=None, help='Optional override for cfg.dataset_base_path')
     
     args = parser.parse_args()
     args.device_ids = parse_device_ids(args.device_ids)
@@ -293,6 +311,57 @@ def main():
         if args.val_batch_size <= 0:
             raise ValueError('--val-batch-size must be positive')
         cfg['val_batch_size'] = args.val_batch_size
+    if args.anno_file is not None:
+        if not os.path.isfile(args.anno_file):
+            raise FileNotFoundError(f'Annotation file not found: {args.anno_file}')
+        cfg['test_json_path'] = args.anno_file
+    if args.max_eval_videos is not None:
+        if args.max_eval_videos <= 0:
+            raise ValueError('--max-eval-videos must be positive')
+        cfg['max_eval_videos'] = args.max_eval_videos
+    if args.num_workers is not None:
+        if args.num_workers < 0:
+            raise ValueError('--num-workers must be non-negative')
+        cfg['num_workers'] = args.num_workers
+    if args.dataset_base_path is not None:
+        cfg['dataset_base_path'] = args.dataset_base_path
+    cfg['evaluation_only'] = bool(args.anno_file or args.max_eval_videos is not None or args.resume or args.save_progress)
+
+    output_root = Path(args.output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    if args.clean and args.resume:
+        raise ValueError('--clean and --resume cannot be used together')
+    known_outputs = (
+        'predictions.json', 'evaluation_results.json', 'summary_results.json',
+        'detailed_results.csv', 'eval_progress.pt', 'eval_progress.pt.tmp',
+    )
+    if args.clean:
+        for name in known_outputs:
+            path = output_root / name
+            if path.is_file():
+                path.unlink()
+        cache_root = output_root / 'data_cache'
+        if cache_root.is_dir():
+            shutil.rmtree(cache_root)
+    if args.cache_data or args.resume:
+        cfg['cache_dir'] = str(output_root / 'data_cache')
+    signature_payload = {
+        'annotation': str(Path(cfg['test_json_path']).resolve()),
+        'annotation_mtime_ns': Path(cfg['test_json_path']).stat().st_mtime_ns,
+        'model': str(Path(args.model_path).resolve()),
+        'model_mtime_ns': Path(args.model_path).stat().st_mtime_ns,
+        'max_eval_videos': cfg.get('max_eval_videos'),
+        'val_batch_size': cfg.get('val_batch_size'),
+    }
+    cfg['eval_signature'] = hashlib.sha1(json.dumps(signature_payload, sort_keys=True).encode('utf-8')).hexdigest()
+    cfg['eval_progress_path'] = str(output_root / 'eval_progress.pt') if (args.save_progress or args.resume) else None
+    cfg['resume_eval'] = args.resume
+    if args.resume and Path(cfg['eval_progress_path']).is_file():
+        progress = torch.load(cfg['eval_progress_path'], map_location='cpu', weights_only=False)
+        if progress.get('signature') != cfg['eval_signature']:
+            raise ValueError('Evaluation progress belongs to different inputs; use --clean')
+        cfg['eval_resume_start_index'] = int(progress.get('next_sample_index', 0))
+        print(f"[resume] Continuing evaluation at window {cfg['eval_resume_start_index']}")
     
     print("Temporal-segmentation model evaluation")
     print("=" * 50)

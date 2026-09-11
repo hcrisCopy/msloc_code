@@ -10,6 +10,7 @@ from sklearn.metrics import f1_score, accuracy_score, recall_score, precision_sc
 import numpy as np
 from typing import List, Dict, Tuple, Any
 import warnings
+import os
 
 
 DINO_NEURON_MODELS = {"DINOv2_NeuronDeMamba_4", "DINOv3_NeuronDeMamba_4"}
@@ -645,12 +646,28 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
 
     video_seg_pred, video_seg_gt = {}, {}
     video_loc_gt = {}
+    processed_samples = int(cfg.get('eval_resume_start_index', 0))
+    progress_path = cfg.get('eval_progress_path')
+    if cfg.get('resume_eval') and progress_path and os.path.isfile(progress_path):
+        state = torch.load(progress_path, map_location='cpu', weights_only=False)
+        if state.get('signature') != cfg.get('eval_signature'):
+            raise ValueError('Evaluation progress belongs to different inputs; use --clean before starting this run')
+        outpred_list = state['outpred_list']
+        gt_label_list = state['gt_label_list']
+        video_list = state['video_list']
+        valLoss = state['valLoss']
+        lossTrainNorm = state['lossTrainNorm']
+        video_seg_pred = state['video_seg_pred']
+        video_seg_gt = state['video_seg_gt']
+        video_loc_gt = state['video_loc_gt']
     
     # Detect binary mode.
     is_binary = cfg.get('mode', '') == 'binary'
 
     with torch.no_grad():
-        for i, (window_idx, input, target, binary_label, video_id) in enumerate(tqdm(val_loader, desc="Validation", total=len(val_loader))):
+        for i, (window_idx, input, target, binary_label, video_id) in enumerate(
+            tqdm(val_loader, desc="Validation", total=len(val_loader), unit="batch", dynamic_ncols=True)
+        ):
             if i == 0:
                 ss_time = time.time()
 
@@ -704,6 +721,24 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
                 
                 video_seg_pred[video_id_j].append((window_idx[j], pred_score))
                 video_seg_gt[video_id_j].append((window_idx[j], target[j].cpu().detach().numpy()))
+
+            processed_samples += len(video_id)
+            if progress_path:
+                state = {
+                    'signature': cfg.get('eval_signature'),
+                    'next_sample_index': processed_samples,
+                    'outpred_list': outpred_list,
+                    'gt_label_list': gt_label_list,
+                    'video_list': video_list,
+                    'valLoss': valLoss,
+                    'lossTrainNorm': lossTrainNorm,
+                    'video_seg_pred': video_seg_pred,
+                    'video_seg_gt': video_seg_gt,
+                    'video_loc_gt': video_loc_gt,
+                }
+                temporary = progress_path + '.tmp'
+                torch.save(state, temporary)
+                os.replace(temporary, progress_path)
 
     # Build per-video evaluation data.
     loc_data = []
@@ -760,6 +795,9 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
         
         pred_labels = [1 if item > 0.5 else 0 for item in outpred]    
     pred_accuracy = accuracy_score(true_labels, pred_labels)
+
+    if progress_path and os.path.isfile(progress_path):
+        os.remove(progress_path)
 
     return pred_accuracy, video_list, pred_labels, true_labels, outpred, all_videos_results
 

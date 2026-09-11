@@ -13,6 +13,20 @@ REPLAY_PATH=${REPLAY_PATH:?Set REPLAY_PATH to normalized replay JSON with real r
 STUDENT_CKPT=${STUDENT_CKPT:?Set STUDENT_CKPT to the ref2-SFT checkpoint}
 TEACHER_CACHE=${TEACHER_CACHE:?Set TEACHER_CACHE to the JSON produced by precheck_opd_teacher.py}
 OUT_DIR=${OUT_DIR:-"$MSLOC_ASSETS/Trace/output/opd_student"}
+RESUME_ARGS=()
+if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
+  RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
+fi
+SAVE_ARGS=(--save_strategy epoch)
+if [[ -n "${SAVE_STEPS:-}" ]]; then
+  SAVE_ARGS=(--save_strategy steps --save_steps "$SAVE_STEPS")
+fi
+if [[ "${CLEAN:-0}" == "1" ]]; then
+  case "$OUT_DIR" in
+    "$MSLOC_ASSETS"/*) rm -rf -- "$OUT_DIR" ;;
+    *) echo "Refusing CLEAN outside MSLOC_ASSETS: $OUT_DIR" >&2; exit 2 ;;
+  esac
+fi
 
 torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --deepspeed "$TRACE_DIR/scripts/zero3.json" \
@@ -21,6 +35,7 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --model_name_or_path "$STUDENT_CKPT" --opd_teacher_model_path "$STUDENT_CKPT" \
   --data_path "$DATA_ROOT/annos/train_all_1209.json" --data_folder "$DATA_ROOT/videos" \
   --train_mode ref2 --replay_path "$REPLAY_PATH" --opd_teacher_cache_path "$TEACHER_CACHE" --replay_balance none --second_stage opd \
+  "${RESUME_ARGS[@]}" \
   --opd_weight ${OPD_WEIGHT:-1.0} --opd_temperature ${OPD_TEMPERATURE:-1.0} \
   --opd_disagreement_iou_gate ${OPD_DISAGREEMENT_IOU_GATE:-0.30} \
   --opd_false_refusal_weight ${FALSE_REFUSAL_WEIGHT:-1.0} --opd_positive_error_weight ${POSITIVE_ERROR_WEIGHT:-0.8} --opd_negative_error_weight ${NEGATIVE_ERROR_WEIGHT:-0.8} \
@@ -29,5 +44,5 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --bnd_ratio 0.2 --bnd_frames 16 --seg_frames 8 --bf16 True --output_dir "$OUT_DIR" \
   --num_train_epochs ${EPOCHS:-1} --per_device_train_batch_size ${BATCH_SIZE:-1} \
   --gradient_accumulation_steps ${GRAD_ACCUM:-4} --learning_rate ${LR:-2e-6} \
-  --save_strategy epoch --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True \
+  "${SAVE_ARGS[@]}" --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True \
   --lazy_preprocess True --sample_scheme rand

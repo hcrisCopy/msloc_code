@@ -140,6 +140,7 @@ class DataArguments:
     
     # Ref2 Mode Arguments
     proposal_path: str = field(default=None, metadata={"help": "Path to the proposal file for ref2 mode."})
+    max_samples: Optional[int] = field(default=None, metadata={"help": "Use only the first N constructed ref2 samples (debug only)."})
     replay_path: Optional[str] = field(default=None, metadata={"help": "Normalized replay JSON from scripts/build_opd_grpo_replay.py."})
     replay_balance: str = field(default="none", metadata={"help": "Replay fractions positive,hard_positive,near_hard_negative,real_false_positive; use none to retain source frequency."})
     opd_teacher_cache_path: Optional[str] = field(default=None, metadata={"help": "Required by OPD: JSON emitted by scripts/precheck_opd_teacher.py for the identical replay and frozen teacher checkpoint."})
@@ -153,6 +154,7 @@ class TrainingArguments(transformers.TrainingArguments):
     mm_projector_lr: Optional[float] = None
     freeze_mm_mlp_adapter: bool = field(default=False)
     remove_unused_columns: bool = field(default=False)
+    resume_from_checkpoint: Optional[str] = field(default=None, metadata={"help": "Checkpoint path or 'auto' to resume from the latest checkpoint in output_dir."})
     cache_dir: Optional[str] = field(default=None)
     # Training Data Arguments 
     group_by_modality_length: bool = field(default=False)
@@ -863,6 +865,12 @@ class LazySupervisedDataset(Dataset):
                             continue
                         self.list_data_dict.append({"video": vid, "proposal": prop, "gt_item": gt_item, "type": "ref2_sample"})
                 rank0_print(f"Loaded {len(self.list_data_dict)} legacy proposals for ref2 training.")
+
+            if data_args.max_samples is not None:
+                if data_args.max_samples <= 0:
+                    raise ValueError("--max_samples must be positive")
+                self.list_data_dict = self.list_data_dict[:data_args.max_samples]
+                rank0_print(f"Debug sample limit active: using {len(self.list_data_dict)} ref2 samples.")
 
         else:
             list_data_dict = json.load(open(data_path, "r"))
@@ -2341,11 +2349,19 @@ def train(attn_implementation="eager"):
     else:
         trainer = TraceTrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
-    # Force load from model_name_or_path, ignoring existing checkpoints in output_dir
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        rank0_print(f"WARNING: Found existing checkpoints in {training_args.output_dir}, but forcing training from {model_args.model_name_or_path} as requested.")
-    
-    trainer.train()
+    resume_checkpoint = training_args.resume_from_checkpoint
+    if resume_checkpoint == "auto":
+        checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+        checkpoints = [path for path in checkpoints if path.is_dir() and path.name.rsplit("-", 1)[-1].isdigit()]
+        if not checkpoints:
+            raise FileNotFoundError(f"No checkpoint-* directory found in {training_args.output_dir}")
+        resume_checkpoint = str(max(checkpoints, key=lambda path: int(path.name.rsplit("-", 1)[-1])))
+    if resume_checkpoint:
+        rank0_print(f"Resuming training from {resume_checkpoint}")
+    elif list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+        rank0_print(f"Existing checkpoints found in {training_args.output_dir}; pass --resume_from_checkpoint auto to reuse them or clean the output first.")
+
+    trainer.train(resume_from_checkpoint=resume_checkpoint or None)
     trainer.save_state()
 
     model.config.use_cache = True

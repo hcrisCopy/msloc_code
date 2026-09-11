@@ -10,8 +10,10 @@ import cv2
 import math
 import warnings
 import json
+import hashlib
 from typing import List, Dict, Any, Tuple
 from pathlib import Path
+from tqdm import tqdm
 
 def get_video_fake_segments(json_data: List[Dict]) -> Dict[str, Dict]:
     """
@@ -60,7 +62,8 @@ def get_video_fake_segments(json_data: List[Dict]) -> Dict[str, Dict]:
 
 def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str, 
                           window_length: float = 1.0, frames_per_window: int = 4,
-                          mode: str = "binary") -> List[Dict]:
+                          mode: str = "binary", cache_dir: str = None,
+                          progress_desc: str = "Loading video windows") -> List[Dict]:
     """
     Parse JSON data and produce sliding-window samples.
 
@@ -74,6 +77,39 @@ def parse_json_to_windows(json_data: List[Dict], dataset_base_path: str,
     Returns:
         A list of window dicts containing frame paths and labels.
     """
+    if cache_dir:
+        cache_root = Path(cache_dir)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        windows = []
+        hits = 0
+        iterator = tqdm(json_data, desc=progress_desc, unit="video", dynamic_ncols=True)
+        for video_item in iterator:
+            cache_key = hashlib.sha1(json.dumps({
+                "video": video_item,
+                "dataset_base_path": str(Path(dataset_base_path).resolve()),
+                "window_length": window_length,
+                "frames_per_window": frames_per_window,
+                "mode": mode,
+            }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+            cache_file = cache_root / f"{cache_key}.json"
+            try:
+                cached = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.is_file() else None
+            except (OSError, json.JSONDecodeError):
+                cached = None
+            if isinstance(cached, list):
+                video_windows = cached
+                hits += 1
+            else:
+                video_windows = parse_json_to_windows(
+                    [video_item], dataset_base_path, window_length, frames_per_window, mode
+                )
+                temporary = cache_file.with_suffix(".tmp")
+                temporary.write_text(json.dumps(video_windows, ensure_ascii=False), encoding="utf-8")
+                os.replace(temporary, cache_file)
+            windows.extend(video_windows)
+            iterator.set_postfix(cache_hits=hits)
+        return windows
+
     fps = 8  # fixed frame rate
     windows = []
     
@@ -496,7 +532,7 @@ class VideoWindowDatasetTest(Dataset):
         return window_idx, frames, label_onehot, binary_label, video_name
 
 
-def generate_dataset_loader_from_json(cfg):
+def generate_dataset_loader_from_json(cfg, evaluation_only=False):
     """
     Build train / test data loaders from JSON annotation files.
 
@@ -512,14 +548,20 @@ def generate_dataset_loader_from_json(cfg):
             - other training-related parameters.
     """
     # Load JSON files.
-    with open(cfg['train_json_path'], 'r') as f:
-        train_json = json.load(f)
+    if evaluation_only:
+        train_json = []
+    else:
+        with open(cfg['train_json_path'], 'r') as f:
+            train_json = json.load(f)
     with open(cfg['test_json_path'], 'r') as f:
         test_json = json.load(f)
+    max_eval_videos = cfg.get('max_eval_videos')
+    if max_eval_videos is not None:
+        test_json = test_json[:max_eval_videos]
     
     # Convert to per-window samples.
-    train_windows = parse_json_to_windows(
-        train_json, 
+    train_windows = [] if evaluation_only else parse_json_to_windows(
+        train_json,
         cfg['dataset_base_path'],
         cfg.get('window_length', 1.0),
         cfg.get('frames_per_window', 4),
@@ -531,12 +573,14 @@ def generate_dataset_loader_from_json(cfg):
         cfg['dataset_base_path'],
         cfg.get('window_length', 1.0),
         cfg.get('frames_per_window', 4),
-        cfg.get('mode', 'binary')
+        cfg.get('mode', 'binary'),
+        str(Path(cfg['cache_dir']) / 'eval_windows') if cfg.get('cache_dir') else None,
+        'Loading evaluation windows'
     )
     test_fake_segments = get_video_fake_segments(test_json)
     
     # Build datasets.
-    train_dataset = VideoWindowDatasetTrain(
+    train_dataset = None if evaluation_only else VideoWindowDatasetTrain(
         train_windows,
         mode=cfg.get('mode', 'binary'),
         transform_config=cfg.get('transform_config', {})
@@ -550,7 +594,7 @@ def generate_dataset_loader_from_json(cfg):
     )
     
     # Build dataloaders.
-    train_loader = DataLoader(
+    train_loader = None if evaluation_only else DataLoader(
         train_dataset,
         batch_size=cfg['train_batch_size'],
         shuffle=True,
@@ -559,8 +603,12 @@ def generate_dataset_loader_from_json(cfg):
         drop_last=True
     )
     
+    eval_start_index = int(cfg.get('eval_resume_start_index', 0))
+    if eval_start_index < 0 or eval_start_index > len(test_dataset):
+        raise ValueError(f"Invalid eval_resume_start_index={eval_start_index} for {len(test_dataset)} windows")
+    eval_dataset = data.Subset(test_dataset, range(eval_start_index, len(test_dataset))) if eval_start_index else test_dataset
     test_loader = DataLoader(
-        test_dataset,
+        eval_dataset,
         batch_size=cfg['val_batch_size'],
         shuffle=False,
         num_workers=cfg['num_workers'],
@@ -570,6 +618,9 @@ def generate_dataset_loader_from_json(cfg):
 
 
     
-    print(f"******* Training Windows: {len(train_windows)} -> Balanced: {len(train_dataset)}")
+    if evaluation_only:
+        print(f"******* Evaluation Videos: {len(test_json)}; Evaluation Windows: {len(test_windows)} *******")
+    else:
+        print(f"******* Training Windows: {len(train_windows)} -> Balanced: {len(train_dataset)}")
     
     return train_loader, test_loader, test_fake_segments

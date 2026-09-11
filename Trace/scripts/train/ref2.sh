@@ -17,8 +17,8 @@ MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 MASTER_PORT=${MASTER_PORT:-16666}
 RANK=${RANK:-0}
 
-GLOBAL_BATCH_SIZE=4
-GRADIENT_ACCUMULATION_STEPS=2
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-4}
+GRADIENT_ACCUMULATION_STEPS=${GRAD_ACCUM:-2}
 DENOMINATOR=$(($WORLD_SIZE*$NPROC_PER_NODE*$GRADIENT_ACCUMULATION_STEPS))
 if [ "$GLOBAL_BATCH_SIZE" -lt "$DENOMINATOR" ] || [ $((GLOBAL_BATCH_SIZE % DENOMINATOR)) -ne 0 ]; then
   echo "GLOBAL_BATCH_SIZE=$GLOBAL_BATCH_SIZE must be a positive multiple of WORLD_SIZE*NPROC_PER_NODE*GRADIENT_ACCUMULATION_STEPS=$DENOMINATOR" >&2
@@ -33,6 +33,24 @@ export NCCL_P2P_LEVEL=NVL
 export HCCL_BUFFSIZE=1024
 RUN_NAME=trace_vllava
 OUTP_DIR=${OUTP_DIR:-"$MSLOC_ASSETS/Trace/output/trace_vllava/ref2"}
+MAX_SAMPLE_ARGS=()
+if [[ -n "${MAX_SAMPLES:-}" ]]; then
+    MAX_SAMPLE_ARGS=(--max_samples "$MAX_SAMPLES")
+fi
+RESUME_ARGS=()
+if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
+    RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
+fi
+SAVE_ARGS=(--save_strategy epoch)
+if [[ -n "${SAVE_STEPS:-}" ]]; then
+    SAVE_ARGS=(--save_strategy steps --save_steps "$SAVE_STEPS")
+fi
+if [[ "${CLEAN:-0}" == "1" ]]; then
+    case "$OUTP_DIR" in
+        "$MSLOC_ASSETS"/*) rm -rf -- "$OUTP_DIR" ;;
+        *) echo "Refusing CLEAN outside MSLOC_ASSETS: $OUTP_DIR" >&2; exit 2 ;;
+    esac
+fi
 
 ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --nproc_per_node $NPROC_PER_NODE \
@@ -53,6 +71,8 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --data_folder "$DATA_ROOT/videos" \
     --train_mode ref2 \
     --proposal_path "$PROPOSAL_PATH" \
+    "${MAX_SAMPLE_ARGS[@]}" \
+    "${RESUME_ARGS[@]}" \
     --bnd_ratio 0.2 \
     --bnd_frames 16 \
     --seg_frames 8 \
@@ -67,13 +87,12 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --tf32 False \
     --fp16 False \
     --output_dir "$OUTP_DIR" \
-    --num_train_epochs 2 \
+    --num_train_epochs ${EPOCHS:-2} \
     --per_device_train_batch_size $LOCAL_BATCH_SIZE \
     --per_device_eval_batch_size 4 \
     --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
     --evaluation_strategy "no" \
-    --save_strategy "epoch" \
-    --save_steps 5000 \
+    "${SAVE_ARGS[@]}" \
     --save_total_limit 99 \
     --learning_rate 5e-6 \
     --weight_decay 0. \
@@ -82,7 +101,7 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --logging_steps 1 \
     --model_max_length 4096 \
     --gradient_checkpointing True \
-    --dataloader_num_workers 4 \
+    --dataloader_num_workers ${NUM_WORKERS:-4} \
     --run_name $RUN_NAME \
     --lazy_preprocess True \
     --sample_scheme "rand"
