@@ -164,6 +164,11 @@ def main() -> None:
     parser.add_argument("--minimum-recovery-improvement", type=float, default=0.0)
     parser.add_argument("--maximum-negative-noevent-drop", type=float, default=0.02)
     parser.add_argument("--minimum-reliable-positive-rate", type=float, default=0.05)
+    parser.add_argument(
+        "--smoke-allow-failed-precheck",
+        action="store_true",
+        help="Smoke test only: write a marked cache and exit successfully when the quality gate fails.",
+    )
     args = parser.parse_args()
 
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
@@ -318,6 +323,7 @@ def main() -> None:
         "localized_rate_gain": recovery_gain,
         "negative_noevent_drop": negative_drop,
         "pair_benefit_passed": pair_benefit_passed,
+        "smoke_allow_failed_precheck": bool(args.smoke_allow_failed_precheck),
         "records": checked,
     }
     output = Path(args.output)
@@ -327,13 +333,19 @@ def main() -> None:
 
     if args.enforce_pair_benefit:
         if not pair_benefit_passed:
-            raise SystemExit(
-                "Paired frozen teacher did not pass the precheck: "
-                f"localized-rate gain={recovery_gain:.4f} (required >= {args.minimum_recovery_improvement:.4f}), "
-                f"reliable-positive rate={reliable_positive_rate:.4f} (required >= {args.minimum_reliable_positive_rate:.4f}), "
-                f"negative no-event drop={negative_drop:.4f} (allowed <= {args.maximum_negative_noevent_drop:.4f}). "
-                f"Report was still written to {output}; do not start OPD."
-            )
+            if args.smoke_allow_failed_precheck:
+                print(
+                    "[SMOKE ONLY] Teacher quality gate failed; continuing only to test the OPD/GRPO code path. "
+                    "The cache is marked unvalidated and must not be used for a formal experiment."
+                )
+            else:
+                raise SystemExit(
+                    "Paired frozen teacher did not pass the precheck: "
+                    f"localized-rate gain={recovery_gain:.4f} (required >= {args.minimum_recovery_improvement:.4f}), "
+                    f"reliable-positive rate={reliable_positive_rate:.4f} (required >= {args.minimum_reliable_positive_rate:.4f}), "
+                    f"negative no-event drop={negative_drop:.4f} (allowed <= {args.maximum_negative_noevent_drop:.4f}). "
+                    f"Report was still written to {output}; do not start OPD."
+                )
     if distributed:
         dist.destroy_process_group()
 

@@ -24,6 +24,10 @@ MAX_SAMPLE_ARGS=()
 if [[ -n "${MAX_SAMPLES:-}" ]]; then
   MAX_SAMPLE_ARGS=(--max_samples "$MAX_SAMPLES")
 fi
+SMOKE_ARGS=()
+if [[ "${SMOKE_ALLOW_UNVALIDATED_TEACHER:-0}" == "1" ]]; then
+  SMOKE_ARGS=(--opd_smoke_allow_unvalidated_teacher True)
+fi
 SAVE_ARGS=(--save_strategy epoch)
 if [[ -n "${SAVE_STEPS:-}" ]]; then
   SAVE_ARGS=(--save_strategy steps --save_steps "$SAVE_STEPS")
@@ -42,6 +46,7 @@ torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-8} "$TRACE_DIR/trace/tr
   --model_name_or_path "$STUDENT_CKPT" --opd_teacher_model_path "$STUDENT_CKPT" \
   --data_path "$DATA_ROOT/annos/train_all_1209.json" --data_folder "$DATA_ROOT/videos" \
   --train_mode ref2 --replay_path "$REPLAY_PATH" --opd_teacher_cache_path "$TEACHER_CACHE" --replay_balance none --second_stage opd \
+  "${SMOKE_ARGS[@]}" \
   "${MAX_SAMPLE_ARGS[@]}" \
   "${RESUME_ARGS[@]}" \
   --opd_weight ${OPD_WEIGHT:-1.0} --opd_temperature ${OPD_TEMPERATURE:-1.0} \

@@ -199,6 +199,10 @@ class TrainingArguments(transformers.TrainingArguments):
     opd_guided_max_tokens: int = field(default=16)
     opd_teacher_iou_gate: float = field(default=0.3)
     opd_teacher_model_path: Optional[str] = field(default=None)
+    opd_smoke_allow_unvalidated_teacher: bool = field(
+        default=False,
+        metadata={"help": "Smoke test only: permit a cache explicitly marked by --smoke-allow-failed-precheck."},
+    )
     grpo_group_size: int = field(default=4)
     grpo_temperature: float = field(default=0.7)
     grpo_max_new_tokens: int = field(default=128)
@@ -2304,10 +2308,22 @@ def train(attn_implementation="eager"):
                 "The paired-input teacher must be validated before distillation."
             )
         cache_manifest = json.load(open(data_args.opd_teacher_cache_path, "r", encoding="utf-8"))
-        if not isinstance(cache_manifest, dict) or cache_manifest.get("pair_benefit_passed") is not True:
+        smoke_cache_allowed = (
+            training_args.opd_smoke_allow_unvalidated_teacher
+            and isinstance(cache_manifest, dict)
+            and cache_manifest.get("smoke_allow_failed_precheck") is True
+        )
+        if not isinstance(cache_manifest, dict) or (
+            cache_manifest.get("pair_benefit_passed") is not True and not smoke_cache_allowed
+        ):
             raise ValueError(
                 "OPD teacher cache did not pass the localization/reliability precheck. "
                 "Do not start OPD with an unvalidated paired teacher."
+            )
+        if smoke_cache_allowed and cache_manifest.get("pair_benefit_passed") is not True:
+            print(
+                "[SMOKE ONLY] Running OPD with an unvalidated teacher cache to test the code path. "
+                "Unreliable records remain excluded from OPD KL; this run has no experimental validity."
             )
         cached_teacher_path = cache_manifest.get("teacher_model_path") if isinstance(cache_manifest, dict) else None
         if cached_teacher_path and os.path.normcase(os.path.abspath(cached_teacher_path)) != os.path.normcase(os.path.abspath(training_args.opd_teacher_model_path)):
