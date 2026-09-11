@@ -35,17 +35,24 @@ RAW_ANNO_FILE=${RAW_ANNO_FILE:-"$DATA_ROOT/annos/test_all_1209.json"}
 VIDEO_DIR=${VIDEO_DIR:-"$DATA_ROOT/videos"}
 PROMPT_FILE="${DIR}/trace/prompts/dvc.txt"
 
-NUM_FRAME=40
-MAX_NEW_TOKENS=512
+NUM_FRAME=${NUM_FRAME:-40}
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
+SAMPLE_NUM=${SAMPLE_NUM:--1}
 
 # Ref Mode Sampling Arguments (Same as training)
 BND_RATIO=0.2
 BND_FRAMES=16
 SEG_FRAMES=8
 
-NUM_GPUS=1
+NUM_GPUS=${NUM_GPUS:-1}
 
-OUTPUT_DIR="${MSLOC_ASSETS}/Trace/inference_results/ref2_${DATASET}_${SPLIT}"
+OUTPUT_DIR=${OUTPUT_DIR:-"${MSLOC_ASSETS}/Trace/inference_results/ref2_${DATASET}_${SPLIT}"}
+if [[ "${CLEAN:-0}" == "1" ]]; then
+  case "$OUTPUT_DIR" in
+    "$MSLOC_ASSETS"/*) rm -rf -- "$OUTPUT_DIR" ;;
+    *) echo "Refusing CLEAN outside MSLOC_ASSETS: $OUTPUT_DIR" >&2; exit 2 ;;
+  esac
+fi
 mkdir -p "${OUTPUT_DIR}"
 
 # ============================ Parameter checks ============================
@@ -69,6 +76,7 @@ echo "Test anno:    ${TEST_ANNO_FILE}"
 echo "Video dir:    ${VIDEO_DIR}"
 echo "Output dir:   ${OUTPUT_DIR}"
 echo "Num frames:   ${NUM_FRAME}"
+echo "Sample count: ${SAMPLE_NUM}"
 echo "=========================================="
 
 echo "Starting inference..."
@@ -115,7 +123,7 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
       --prompt_file "${PROMPT_FILE}" \
       --model_path "${MODEL_DIR}" \
       --max_new_tokens ${MAX_NEW_TOKENS} \
-      --sample_num -1 \
+      --sample_num ${SAMPLE_NUM} \
       --num_chunks ${NUM_GPUS} \
       --chunk_idx $i \
       --quiet_non_master \
@@ -140,7 +148,7 @@ for i in $(seq 0 $(($NUM_GPUS - 1))); do
       --prompt_file "${PROMPT_FILE}" \
       --model_path "${MODEL_DIR}" \
       --max_new_tokens ${MAX_NEW_TOKENS} \
-      --sample_num -1 \
+      --sample_num ${SAMPLE_NUM} \
       --num_chunks ${NUM_GPUS} \
       --chunk_idx $i \
       --quiet_non_master \
@@ -164,6 +172,12 @@ if [ "${FAILED}" -ne 0 ]; then
 fi
 
 echo "All inference processes finished."
+
+if [ "${NUM_GPUS}" -eq 1 ]; then
+  echo "Single-GPU result saved directly; merge not required."
+  echo "Result file: ${OUTPUT_DIR}/fmt_${DATASET}_${SPLIT}_f${NUM_FRAME}_result.json"
+  exit 0
+fi
 
 echo "Merging results..."
 

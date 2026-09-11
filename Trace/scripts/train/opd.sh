@@ -17,6 +17,10 @@ RESUME_ARGS=()
 if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
 fi
+MAX_SAMPLE_ARGS=()
+if [[ -n "${MAX_SAMPLES:-}" ]]; then
+  MAX_SAMPLE_ARGS=(--max_samples "$MAX_SAMPLES")
+fi
 SAVE_ARGS=(--save_strategy epoch)
 if [[ -n "${SAVE_STEPS:-}" ]]; then
   SAVE_ARGS=(--save_strategy steps --save_steps "$SAVE_STEPS")
@@ -35,6 +39,7 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --model_name_or_path "$STUDENT_CKPT" --opd_teacher_model_path "$STUDENT_CKPT" \
   --data_path "$DATA_ROOT/annos/train_all_1209.json" --data_folder "$DATA_ROOT/videos" \
   --train_mode ref2 --replay_path "$REPLAY_PATH" --opd_teacher_cache_path "$TEACHER_CACHE" --replay_balance none --second_stage opd \
+  "${MAX_SAMPLE_ARGS[@]}" \
   "${RESUME_ARGS[@]}" \
   --opd_weight ${OPD_WEIGHT:-1.0} --opd_temperature ${OPD_TEMPERATURE:-1.0} \
   --opd_disagreement_iou_gate ${OPD_DISAGREEMENT_IOU_GATE:-0.30} \
@@ -44,5 +49,5 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --bnd_ratio 0.2 --bnd_frames 16 --seg_frames 8 --bf16 True --output_dir "$OUT_DIR" \
   --num_train_epochs ${EPOCHS:-1} --per_device_train_batch_size ${BATCH_SIZE:-1} \
   --gradient_accumulation_steps ${GRAD_ACCUM:-4} --learning_rate ${LR:-2e-6} \
-  "${SAVE_ARGS[@]}" --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True \
+  "${SAVE_ARGS[@]}" --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True --dataloader_num_workers ${NUM_WORKERS:-0} \
   --lazy_preprocess True --sample_scheme rand

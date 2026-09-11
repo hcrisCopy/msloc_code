@@ -294,6 +294,7 @@ def main() -> None:
     parser.add_argument("--require-reference", action="store_true", help="Fail if a retained positive proposal lacks a real counterpart")
     parser.add_argument("--near-negative-seconds", type=float, default=1.0, help="Gap threshold for near-hard-negative replay bucket")
     parser.add_argument("--evidence-audit", help="Optional candidate-observability diagnostic keyed as video::start-end; it does not gate GRPO reward")
+    parser.add_argument("--max-records", type=int, default=0, help="Positive value keeps only the first N constructed replay records (debug only)")
     args = parser.parse_args()
     if args.paired_only and not args.video_root:
         parser.error("--paired-only requires --video-root so missing _real.mp4 counterparts can be excluded")
@@ -317,6 +318,11 @@ def main() -> None:
         paired_only=args.paired_only,
         video_root=Path(args.video_root).resolve() if args.video_root else None,
     )
+    if args.max_records < 0:
+        parser.error("--max-records must be non-negative")
+    if args.max_records > 0:
+        records = records[:args.max_records]
+        print(f"Debug replay limit active: using {len(records)} records.")
     if args.paired_only and not records:
         raise SystemExit(
             "Paired-only replay is empty: no stage-1 proposals came from a fake video "

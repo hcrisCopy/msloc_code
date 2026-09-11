@@ -1,0 +1,15 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Experiment logs
+/wandb/
+*.log
+
+# Local TRACE artifacts (normal runs write to ../MSLoc_data)
+/Trace/output/
+/Trace/inference_results/
+/Trace/checkpoints/

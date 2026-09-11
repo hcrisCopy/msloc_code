@@ -21,7 +21,9 @@ scikit-learn==1.2.2
 einops==0.6.1
 einops-exts==0.0.4
 timm==0.6.13
-bitsandbytes==0.41.0
+# Optional: bitsandbytes is needed only when explicitly using --bits 4/8 or
+# an Adam8bit optimizer. The OPD/GRPO runbook uses 16-bit AdamW and does not
+# install it because old bitsandbytes wheels require a system CUDA toolkit.
 safetensors>=0.4.0
 huggingface-hub>=0.23.0
 pillow>=9.0.0

@@ -26,6 +26,10 @@ RESUME_ARGS=()
 if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
 fi
+MAX_SAMPLE_ARGS=()
+if [[ -n "${MAX_SAMPLES:-}" ]]; then
+  MAX_SAMPLE_ARGS=(--max_samples "$MAX_SAMPLES")
+fi
 SAVE_ARGS=(--save_strategy epoch)
 if [[ -n "${SAVE_STEPS:-}" ]]; then
   SAVE_ARGS=(--save_strategy steps --save_steps "$SAVE_STEPS")
@@ -43,6 +47,7 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --mm_projector_type spatial_slot --tune_mm_mlp_adapter True --tune_mm_embed_head True --tune_lm_embed_head True \
   --model_name_or_path "$OPD_CKPT" --data_path "$DATA_ROOT/annos/train_all_1209.json" --data_folder "$DATA_ROOT/videos" \
   --train_mode ref2 --replay_path "$REPLAY_PATH" --replay_balance none --second_stage grpo \
+  "${MAX_SAMPLE_ARGS[@]}" \
   "${RESUME_ARGS[@]}" \
   --grpo_group_size ${GROUP_SIZE:-4} --grpo_temperature ${TEMPERATURE:-0.7} --grpo_max_new_tokens ${MAX_NEW_TOKENS:-128} \
   --grpo_localization_weight 1.0 --grpo_explanation_weight "$EXPLANATION_WEIGHT" --grpo_format_weight 0.1 \
@@ -51,5 +56,5 @@ torchrun --nproc_per_node=${NPROC_PER_NODE:-1} "$TRACE_DIR/trace/train_mt.py" \
   --bnd_ratio 0.2 --bnd_frames 16 --seg_frames 8 --bf16 True --output_dir "$OUT_DIR" \
   --num_train_epochs ${EPOCHS:-1} --per_device_train_batch_size ${BATCH_SIZE:-1} \
   --gradient_accumulation_steps ${GRAD_ACCUM:-4} --learning_rate ${LR:-1e-6} \
-  "${SAVE_ARGS[@]}" --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True \
+  "${SAVE_ARGS[@]}" --logging_steps 1 --model_max_length 4096 --gradient_checkpointing True --dataloader_num_workers ${NUM_WORKERS:-0} \
   --lazy_preprocess True --sample_scheme rand
