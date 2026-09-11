@@ -9,37 +9,10 @@ paired-only replay；冻结教师预检；OPD；GRPO；candidate-only 测试。
 
 ## 0. 一次性配置路径
 
-从仓库根目录执行。以下全部替换为服务器上的绝对路径。
+从仓库根目录执行。脚本自动使用仓库同级的 `../MSLoc_data`：
 
 ~~~bash
-cd msloc_code
-
-export REPO_ROOT="$PWD"
-# Resolve this once so subsequent scripts remain correct even if their working
-# directory changes. It must be the sibling MSLoc_data directory of this repo.
-export MSLOC_ASSETS="$(cd "$REPO_ROOT/../MSLoc_data" && pwd)"
-export DATA_ROOT="$MSLOC_ASSETS/data/Tasle-CoT-10K"
-export TRAIN_ANNO="$DATA_ROOT/annos/train_all_1209.json"
-export TEST_ANNO="$DATA_ROOT/annos/test_all_1209_0119.json"
-export VIDEO_ROOT="$DATA_ROOT/videos"
-export FRAME_ROOT="$MSLOC_ASSETS/DeMamba/video_frames"
-export TRACE_BASE="$MSLOC_ASSETS/Trace/ckpts/trace-uni"
-export VISION_TOWER="$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336"
-
-# Use the existing XCLIP first-stage model and its trained four-class checkpoint.
-export STAGE1_CONFIG="$MSLOC_ASSETS/DeMamba/full/configs/xclip_neurons_full.yaml"
-export STAGE1_CKPT="$MSLOC_ASSETS/DeMamba/full/method/results/best_acc.pth"
-export EXP_ROOT="$MSLOC_ASSETS/Trace/experiments/opd_grpo"
-mkdir -p "$EXP_ROOT"
-
-test -f "$TRAIN_ANNO"
-test -f "$TEST_ANNO"
-test -d "$VIDEO_ROOT"
-test -d "$FRAME_ROOT"
-test -d "$TRACE_BASE"
-test -d "$VISION_TOWER"
-test -f "$STAGE1_CONFIG"
-test -f "$STAGE1_CKPT"
+source Trace/scripts/setup_opd_grpo_env.sh
 ~~~
 
 
