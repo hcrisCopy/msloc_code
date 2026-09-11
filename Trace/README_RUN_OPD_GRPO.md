@@ -75,7 +75,7 @@ test -f "$SFT_CKPT/config.json"
 小样本调试：
 
 ~~~bash
-PROPOSAL_PATH=../MSLoc_data/DeMamba/full/method/eval_train/predictions.json BASE_CKPT="$TRACE_BASE" OUTP_DIR="$EXP_ROOT/ref2_sft" MAX_SAMPLES=3 EPOCHS=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 bash Trace/scripts/train/ref2.sh
+PROPOSAL_PATH=../MSLoc_data/DeMamba/full/method/eval_train/predictions.json BASE_CKPT="$TRACE_BASE" OUTP_DIR="$EXP_ROOT/ref2_sft" MAX_SAMPLES=3 GLOBAL_BATCH_SIZE=1 GRAD_ACCUM=1 EPOCHS=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 bash Trace/scripts/train/ref2.sh
 
 export SFT_CKPT="$EXP_ROOT/ref2_sft"
 ~~~
@@ -116,17 +116,7 @@ python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$S
 学生和教师都加载同一个冻结 SFT checkpoint。学生只看 candidate；教师看原尺寸
 上下对照视频，帧尺寸为 672x336。此步骤只推理，不更新参数。
 
-小样本调试，验证非方形视觉输入、显存和输出解析：
-
-~~~bash
-export PRECHECK_SMOKE="$EXP_ROOT/precheck_smoke.json"
-
-PYTHONPATH="$REPO_ROOT/Trace:$PYTHONPATH" python Trace/scripts/precheck_opd_teacher.py --replay "$REPLAY_PATH" --data-folder "$VIDEO_ROOT" --model-path "$SFT_CKPT" --vision-tower "$VISION_TOWER" --output "$PRECHECK_SMOKE" --version v1_mistral --max-samples 3
-
-export TEACHER_CACHE="$PRECHECK_SMOKE"
-~~~
-
-确认没有 shape error、OOM 或解析错误后运行完整预检。完整预检要求 paired 输入使
+正式运行。完整预检要求 paired 输入使
 正 proposal 恢复率至少提高 1 个百分点，同时负 proposal 的 no-forgery 正确率下降
 不超过 2 个百分点。
 
@@ -136,6 +126,16 @@ export TEACHER_CACHE="$EXP_ROOT/opd_teacher_precheck.json"
 REPLAY_PATH="$REPLAY_PATH" SFT_CKPT="$SFT_CKPT" MSLOC_ASSETS="$MSLOC_ASSETS" DATA_ROOT="$DATA_ROOT" OUT_PATH="$TEACHER_CACHE" MIN_RECOVERY_IMPROVEMENT=0.01 MAX_NEGATIVE_NOEVENT_DROP=0.02 bash Trace/scripts/train/precheck_opd_teacher.sh
 
 test -f "$TEACHER_CACHE"
+~~~
+
+小样本调试，验证非方形视觉输入、显存和输出解析：
+
+~~~bash
+export PRECHECK_SMOKE="$EXP_ROOT/precheck_smoke.json"
+
+PYTHONPATH="$REPO_ROOT/Trace:$PYTHONPATH" python Trace/scripts/precheck_opd_teacher.py --replay "$REPLAY_PATH" --data-folder "$VIDEO_ROOT" --model-path "$SFT_CKPT" --vision-tower "$VISION_TOWER" --output "$PRECHECK_SMOKE" --version v1_mistral --max-samples 3
+
+export TEACHER_CACHE="$PRECHECK_SMOKE"
 ~~~
 
 若完整预检返回非零，停止 OPD，检查预检 JSON 的 candidate 与 paired 指标；不可

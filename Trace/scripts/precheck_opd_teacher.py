@@ -159,6 +159,11 @@ def main() -> None:
     parser.add_argument("--maximum-negative-noevent-drop", type=float, default=0.02)
     args = parser.parse_args()
 
+    if not args.model_path:
+        parser.error("--model-path is empty; run 'source Trace/scripts/setup_opd_grpo_env.sh' or set SFT_CKPT")
+    if not Path(args.model_path).is_dir():
+        parser.error(f"--model-path is not a checkpoint directory: {args.model_path}")
+
     if not 0.0 <= args.teacher_iou_gate <= 1.0:
         raise ValueError("--teacher-iou-gate must be in [0, 1]")
     replay = json.loads(Path(args.replay).read_text(encoding="utf-8"))
