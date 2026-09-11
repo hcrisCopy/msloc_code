@@ -19,6 +19,8 @@ source Trace/scripts/setup_opd_grpo_env.sh
 
 ## 1. 使用已有 DeMamba checkpoint 生成训练集 proposal
 
+正式运行：
+
 ~~~bash
 python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --device-ids 0 --val-batch-size 16 --save-progress --cache-data --clean
 
@@ -30,25 +32,30 @@ export STAGE1_TEST_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval/predictions.
 
 ~~~bash
 python DeMamba/eval.py --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json --dataset-base-path ../MSLoc_data/DeMamba/video_frames --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth --output_dir ../MSLoc_data/DeMamba/full/method/eval_train --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json --max-eval-videos 3 --save-progress --cache-data --num-workers 0 --device-ids 0 --val-batch-size 1 --clean
+
+export STAGE1_TRAIN_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval_train/predictions.json
+export STAGE1_TEST_PROPOSALS=../MSLoc_data/DeMamba/full/method/eval/predictions.json
 ~~~
 
 中断后续跑时移除 `--clean` 并在原命令末尾使用 `--resume`；数据窗口缓存会自动复用。
 
 ## 2. candidate-only ref2 SFT
 
+正式运行：
+
 ~~~bash
-export SFT_OUT="$EXP_ROOT/ref2_sft"
+PROPOSAL_PATH=../MSLoc_data/DeMamba/full/method/eval_train/predictions.json BASE_CKPT="$TRACE_BASE" OUTP_DIR="$EXP_ROOT/ref2_sft" CLEAN=1 bash Trace/scripts/train/ref2.sh
 
-PROPOSAL_PATH="$STAGE1_TRAIN_PROPOSALS" BASE_CKPT="$TRACE_BASE" OUTP_DIR="$SFT_OUT" CLEAN=1 bash Trace/scripts/train/ref2.sh
-
-export SFT_CKPT="$SFT_OUT"
+export SFT_CKPT="$EXP_ROOT/ref2_sft"
 test -f "$SFT_CKPT/config.json"
 ~~~
 
 小样本调试：
 
 ~~~bash
-PROPOSAL_PATH="$STAGE1_TRAIN_PROPOSALS" BASE_CKPT="$TRACE_BASE" OUTP_DIR="$SFT_OUT" MAX_SAMPLES=3 EPOCHS=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 bash Trace/scripts/train/ref2.sh
+PROPOSAL_PATH=../MSLoc_data/DeMamba/full/method/eval_train/predictions.json BASE_CKPT="$TRACE_BASE" OUTP_DIR="$EXP_ROOT/ref2_sft" MAX_SAMPLES=3 EPOCHS=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 bash Trace/scripts/train/ref2.sh
+
+export SFT_CKPT="$EXP_ROOT/ref2_sft"
 ~~~
 
 中断后在原命令中移除 `CLEAN=1` 并加入 `RESUME_FROM_CHECKPOINT=auto`。

@@ -30,8 +30,6 @@ from typing import Dict, Optional, Sequence, List
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import Compose, Lambda, ToTensor
-from pytorchvideo.data.encoded_video import EncodedVideo
-from pytorchvideo.transforms import ApplyTransformToKey, ShortSideScale, UniformTemporalSubsample
 
 import cv2
 import decord
