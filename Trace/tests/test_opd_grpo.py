@@ -115,6 +115,17 @@ class OpdGrpoTests(unittest.TestCase):
         self.assertFalse(records[1]["is_positive"])
         self.assertEqual(records[1]["reference"]["reference_segment"], [6.0, 7.0])
 
+    def test_candidate_replay_keeps_real_video_false_positives(self):
+        gt = [{"video_path": "real.mp4", "type": "real", "annotations": []}]
+        proposals = [{"video_path": "real.mp4", "type": "real", "model_inference": {
+            "segment": [[1.0, 3.0]]
+        }}]
+        records = replay.build_records(gt, proposals, {}, paired_only=False)
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["is_positive"])
+        self.assertEqual(records[0]["replay_bucket"], "real_false_positive")
+        self.assertIsNone(records[0]["reference"])
+
     def test_reference_text_reward_matches_evidence_and_penalises_generic_text(self):
         evidence = opd.EvidenceCard(
             object_caption="The mouth flickers and changes shape unnaturally.",

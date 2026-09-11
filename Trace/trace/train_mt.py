@@ -1270,11 +1270,9 @@ class LazySupervisedDataset(Dataset):
             # A reference is a training-only privileged input.  It must be a
             # real, separately mapped clip with an explicit aligned interval;
             # copying the candidate here would make OPD scientifically invalid.
-            # Every OPD row has a frozen-teacher view.  For a real proposal
-            # with no independent counterpart this is the candidate itself,
-            # used only as a candidate-only no-event anchor.  It is never
-            # presented as a fake/real visual pair.
-            teacher_video = video
+            # Teacher tensors exist only in OPD. SFT and GRPO remain strictly
+            # candidate-only and should not carry duplicate teacher inputs.
+            teacher_video = None
             has_reference_pair = False
             reference = sources.get('reference')
             if reference and self.data_args.use_reference_pair:
@@ -2243,16 +2241,23 @@ def train(attn_implementation="eager"):
         raise ValueError(f"Unknown --second_stage {training_args.second_stage!r}")
     if training_args.second_stage in {"opd", "grpo"}:
         if not data_args.replay_path:
-            raise ValueError(f"{training_args.second_stage.upper()} requires a normalized paired-only replay")
+            raise ValueError(f"{training_args.second_stage.upper()} requires a normalized replay")
         replay_manifest = json.load(open(data_args.replay_path, "r", encoding="utf-8"))
-        if not isinstance(replay_manifest, dict) or replay_manifest.get("paired_only") is not True:
+        if not isinstance(replay_manifest, dict) or not isinstance(replay_manifest.get("records"), list):
+            raise ValueError("OPD/GRPO replay must be an object containing a records list")
+        if training_args.second_stage == "opd" and replay_manifest.get("paired_only") is not True:
             raise ValueError(
-                f"{training_args.second_stage.upper()} is restricted to fake videos with an existing `_real` counterpart. "
+                "OPD is restricted to fake videos with an existing `_real` counterpart. "
                 "Rebuild replay with scripts/build_opd_grpo_replay.py --paired-only --video-root ..."
             )
     if training_args.second_stage == "grpo":
         if data_args.train_mode != "ref2" or not data_args.replay_path:
             raise ValueError("GRPO must use train_mode=ref2 and a normalized --replay_path built from real stage-1 proposals")
+        if replay_manifest.get("paired_only") is True:
+            raise ValueError(
+                "GRPO must use the full candidate-only replay, not the OPD paired-only replay. "
+                "Rebuild without --paired-only so real-video false positives are retained."
+            )
         if training_args.grpo_group_size < 2:
             raise ValueError("GRPO requires --grpo_group_size >= 2")
         if training_args.grpo_text_reward_mode not in {"lexical", "nli"}:
@@ -2299,6 +2304,11 @@ def train(attn_implementation="eager"):
                 "The paired-input teacher must be validated before distillation."
             )
         cache_manifest = json.load(open(data_args.opd_teacher_cache_path, "r", encoding="utf-8"))
+        if not isinstance(cache_manifest, dict) or cache_manifest.get("pair_benefit_passed") is not True:
+            raise ValueError(
+                "OPD teacher cache did not pass the localization/reliability precheck. "
+                "Do not start OPD with an unvalidated paired teacher."
+            )
         cached_teacher_path = cache_manifest.get("teacher_model_path") if isinstance(cache_manifest, dict) else None
         if cached_teacher_path and os.path.normcase(os.path.abspath(cached_teacher_path)) != os.path.normcase(os.path.abspath(training_args.opd_teacher_model_path)):
             raise ValueError(

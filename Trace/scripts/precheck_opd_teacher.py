@@ -132,6 +132,10 @@ def _summary(records: Iterable[Mapping[str, Any]], key: str, iou_gate: float) ->
         "positive_event_rate": fraction(positives, lambda row: status(row) == VALID_EVENT),
         "positive_false_rejection_rate": fraction(positives, lambda row: status(row) != VALID_EVENT),
         "positive_localized_rate": fraction(positives, lambda row: row[key]["matched_iou"] >= iou_gate),
+        "positive_mean_iou": (
+            sum(float(row[key]["matched_iou"]) for row in positives) / len(positives)
+            if positives else 0.0
+        ),
         "negative_no_event_rate": fraction(negatives, lambda row: status(row) == VALID_NO_EVENT),
         "negative_false_event_rate": fraction(negatives, lambda row: status(row) == VALID_EVENT),
         "format_failure_rate": fraction(rows, lambda row: status(row) not in {VALID_EVENT, VALID_NO_EVENT}),
@@ -154,9 +158,10 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--teacher-iou-gate", type=float, default=0.3)
     parser.add_argument("--max-samples", type=int, default=0, help="Positive value runs only this many records for a smoke test")
-    parser.add_argument("--enforce-pair-benefit", action="store_true", help="Exit nonzero unless paired input lowers positive false rejection without excessive negative degradation")
+    parser.add_argument("--enforce-pair-benefit", action="store_true", help="Exit nonzero unless paired input improves positive localization without excessive negative degradation")
     parser.add_argument("--minimum-recovery-improvement", type=float, default=0.0)
     parser.add_argument("--maximum-negative-noevent-drop", type=float, default=0.02)
+    parser.add_argument("--minimum-reliable-positive-rate", type=float, default=0.05)
     args = parser.parse_args()
 
     if not args.model_path:
@@ -258,6 +263,17 @@ def main() -> None:
 
     candidate_metrics = _summary(checked, "candidate_only", args.teacher_iou_gate)
     teacher_metrics = _summary(checked, "paired_teacher", args.teacher_iou_gate)
+    recovery_gain = teacher_metrics["positive_localized_rate"] - candidate_metrics["positive_localized_rate"]
+    negative_drop = candidate_metrics["negative_no_event_rate"] - teacher_metrics["negative_no_event_rate"]
+    reliable_positive_rate = (
+        sum(row["teacher_reliable"] for row in checked if row["is_positive"])
+        / max(1, sum(row["is_positive"] for row in checked))
+    )
+    pair_benefit_passed = (
+        recovery_gain >= args.minimum_recovery_improvement
+        and negative_drop <= args.maximum_negative_noevent_drop
+        and reliable_positive_rate >= args.minimum_reliable_positive_rate
+    )
     report = {
         "schema_version": 1,
         "purpose": "frozen paired-input teacher validation and OPD reliability cache",
@@ -275,6 +291,10 @@ def main() -> None:
         "candidate_only_metrics": candidate_metrics,
         "paired_teacher_metrics": teacher_metrics,
         "teacher_reliable_proposals": sum(row["teacher_reliable"] for row in checked),
+        "teacher_reliable_positive_rate": reliable_positive_rate,
+        "localized_rate_gain": recovery_gain,
+        "negative_noevent_drop": negative_drop,
+        "pair_benefit_passed": pair_benefit_passed,
         "records": checked,
     }
     output = Path(args.output)
@@ -283,12 +303,11 @@ def main() -> None:
     print(json.dumps({"candidate_only": candidate_metrics, "paired_teacher": teacher_metrics, "cache": str(output)}, ensure_ascii=False, indent=2))
 
     if args.enforce_pair_benefit:
-        recovery_gain = teacher_metrics["positive_event_rate"] - candidate_metrics["positive_event_rate"]
-        negative_drop = candidate_metrics["negative_no_event_rate"] - teacher_metrics["negative_no_event_rate"]
-        if recovery_gain < args.minimum_recovery_improvement or negative_drop > args.maximum_negative_noevent_drop:
+        if not pair_benefit_passed:
             raise SystemExit(
                 "Paired frozen teacher did not pass the precheck: "
-                f"event-rate gain={recovery_gain:.4f} (required >= {args.minimum_recovery_improvement:.4f}), "
+                f"localized-rate gain={recovery_gain:.4f} (required >= {args.minimum_recovery_improvement:.4f}), "
+                f"reliable-positive rate={reliable_positive_rate:.4f} (required >= {args.minimum_reliable_positive_rate:.4f}), "
                 f"negative no-event drop={negative_drop:.4f} (allowed <= {args.maximum_negative_noevent_drop:.4f}). "
                 f"Report was still written to {output}; do not start OPD."
             )

@@ -17,5 +17,6 @@ python "$TRACE_DIR/scripts/precheck_opd_teacher.py" \
   --output "$OUT_PATH" --version v1_mistral --bnd-ratio 0.2 --bnd-frames 16 --seg-frames 8 \
   --teacher-iou-gate ${TEACHER_IOU_GATE:-0.3} \
   --minimum-recovery-improvement ${MIN_RECOVERY_IMPROVEMENT:-0.01} \
+  --minimum-reliable-positive-rate ${MIN_RELIABLE_POSITIVE_RATE:-0.05} \
   --maximum-negative-noevent-drop ${MAX_NEGATIVE_NOEVENT_DROP:-0.02} \
   --enforce-pair-benefit

@@ -17,7 +17,7 @@ source Trace/scripts/setup_opd_grpo_env.sh
 
 ## 1. 生成训练集 proposal
 
-先切换到 DeMamba 使用的环境。
+先切换到 DeMamba 使用的环境 conda activate msloc。
 
 正式：
 
@@ -53,20 +53,24 @@ export SFT_SMOKE="$EXP_ROOT/ref2_sft_smoke"
 PROPOSAL_PATH="$STAGE1_TRAIN_PROPOSALS" BASE_CKPT="$TRACE_BASE" OUTP_DIR="$SFT_SMOKE" MAX_SAMPLES=3 GLOBAL_BATCH_SIZE=1 GRAD_ACCUM=1 EPOCHS=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 bash Trace/scripts/train/ref2.sh
 ```
 
-## 3. 构建 paired replay
+## 3. 构建 OPD/GRPO replay
 
-正式：
+OPD 需要真实配对；GRPO 使用完整 candidate proposal 分布，包含真实视频误报。
 
 ```bash
-export REPLAY_PATH="$EXP_ROOT/opd_grpo_replay.json"
-python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --paired-only --video-root "$VIDEO_ROOT" --require-reference --output "$REPLAY_PATH" --clean
+export OPD_REPLAY="$EXP_ROOT/opd_paired_replay.json"
+export GRPO_REPLAY="$EXP_ROOT/grpo_candidate_replay.json"
+python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --paired-only --video-root "$VIDEO_ROOT" --require-reference --output "$OPD_REPLAY" --clean
+python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --output "$GRPO_REPLAY" --clean
 ```
 
 小样本：
 
 ```bash
-export REPLAY_SMOKE="$EXP_ROOT/opd_grpo_replay_smoke.json"
-python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --paired-only --video-root "$VIDEO_ROOT" --require-reference --max-records 3 --output "$REPLAY_SMOKE" --clean
+export OPD_REPLAY_SMOKE="$EXP_ROOT/opd_paired_replay_smoke.json"
+export GRPO_REPLAY_SMOKE="$EXP_ROOT/grpo_candidate_replay_smoke.json"
+python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --paired-only --video-root "$VIDEO_ROOT" --require-reference --max-records 3 --output "$OPD_REPLAY_SMOKE" --clean
+python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$STAGE1_TRAIN_PROPOSALS" --max-records 3 --output "$GRPO_REPLAY_SMOKE" --clean
 ```
 
 ## 4. 冻结 paired teacher 预检
@@ -75,14 +79,14 @@ python Trace/scripts/build_opd_grpo_replay.py --gt "$TRAIN_ANNO" --proposals "$S
 
 ```bash
 export TEACHER_CACHE="$EXP_ROOT/opd_teacher_precheck.json"
-REPLAY_PATH="$REPLAY_PATH" SFT_CKPT="$SFT_CKPT" OUT_PATH="$TEACHER_CACHE" MIN_RECOVERY_IMPROVEMENT=0.01 MAX_NEGATIVE_NOEVENT_DROP=0.02 bash Trace/scripts/train/precheck_opd_teacher.sh
+REPLAY_PATH="$OPD_REPLAY" SFT_CKPT="$SFT_CKPT" OUT_PATH="$TEACHER_CACHE" MIN_RECOVERY_IMPROVEMENT=0.01 MIN_RELIABLE_POSITIVE_RATE=0.05 MAX_NEGATIVE_NOEVENT_DROP=0.02 bash Trace/scripts/train/precheck_opd_teacher.sh
 ```
 
 小样本只检查链路：
 
 ```bash
 export PRECHECK_SMOKE="$EXP_ROOT/precheck_smoke.json"
-PYTHONPATH="$REPO_ROOT/Trace:$PYTHONPATH" python Trace/scripts/precheck_opd_teacher.py --replay "$REPLAY_SMOKE" --data-folder "$VIDEO_ROOT" --model-path "$SFT_SMOKE" --vision-tower "$VISION_TOWER" --output "$PRECHECK_SMOKE" --version v1_mistral --max-samples 3
+PYTHONPATH="$REPO_ROOT/Trace:$PYTHONPATH" python Trace/scripts/precheck_opd_teacher.py --replay "$OPD_REPLAY_SMOKE" --data-folder "$VIDEO_ROOT" --model-path "$SFT_CKPT" --vision-tower "$VISION_TOWER" --output "$PRECHECK_SMOKE" --version v1_mistral --max-samples 3
 ```
 
 正式预检失败时不要进入 OPD。
@@ -93,7 +97,7 @@ PYTHONPATH="$REPO_ROOT/Trace:$PYTHONPATH" python Trace/scripts/precheck_opd_teac
 
 ```bash
 export OPD_OUT="$EXP_ROOT/opd"
-REPLAY_PATH="$REPLAY_PATH" STUDENT_CKPT="$SFT_CKPT" TEACHER_CACHE="$TEACHER_CACHE" OUT_DIR="$OPD_OUT" EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=4 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/opd.sh
+REPLAY_PATH="$OPD_REPLAY" STUDENT_CKPT="$SFT_CKPT" TEACHER_CACHE="$TEACHER_CACHE" OUT_DIR="$OPD_OUT" EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=4 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/opd.sh
 export OPD_CKPT="$OPD_OUT"
 ```
 
@@ -101,47 +105,53 @@ export OPD_CKPT="$OPD_OUT"
 
 ```bash
 export OPD_SMOKE="$EXP_ROOT/opd_smoke"
-REPLAY_PATH="$REPLAY_SMOKE" STUDENT_CKPT="$SFT_SMOKE" TEACHER_CACHE="$PRECHECK_SMOKE" OUT_DIR="$OPD_SMOKE" MAX_SAMPLES=3 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/opd.sh
+REPLAY_PATH="$OPD_REPLAY_SMOKE" STUDENT_CKPT="$SFT_CKPT" TEACHER_CACHE="$PRECHECK_SMOKE" OUT_DIR="$OPD_SMOKE" MAX_SAMPLES=3 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/opd.sh
 ```
 
-## 6. GRPO 文字解释奖励
+## 6. Lexical 文字奖励小样本
 
 GRPO 保留定位、解释、格式三类奖励。解释奖励使用标注中的
 `object/start/end class + caption`，不再调用 235B 或读取视频。
+它衡量与参考答案的一致性，不等同于视觉真实性验证。
 
-### 6.1 lexical 小样本
-
-无需额外模型：
+`lexical`：关键词规范化、领域同义词和 token F1；无需额外模型，速度最快。
 
 ```bash
-export GRPO_SMOKE_OUT="$EXP_ROOT/grpo_smoke"
-REPLAY_PATH="$REPLAY_SMOKE" OPD_CKPT="$OPD_SMOKE" OUT_DIR="$GRPO_SMOKE_OUT" TEXT_REWARD_MODE=lexical EXPLANATION_WEIGHT=0.3 MAX_SAMPLES=3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/grpo.sh
+export GRPO_LEXICAL_SMOKE="$EXP_ROOT/grpo_lexical_smoke"
+REPLAY_PATH="$GRPO_REPLAY_SMOKE" OPD_CKPT="$OPD_CKPT" OUT_DIR="$GRPO_LEXICAL_SMOKE" TEXT_REWARD_MODE=lexical EXPLANATION_WEIGHT=0.3 MAX_SAMPLES=3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/grpo.sh
 ```
 
-### 6.2 NLI 小样本
+## 7. NLI 文字奖励小样本
 
-NLI 使用冻结的预训练模型，不需要训练：
+`nli` 是 lexical 加强版：保留 lexical 匹配，再增加语义同义改写和矛盾检测。
+NLI 模型冻结，只推理、不训练。
 
 ```bash
 hf download cross-encoder/nli-deberta-v3-small --local-dir ../MSLoc_data/Trace/ckpts/nli-deberta-v3-small
 export NLI_MODEL_PATH=../MSLoc_data/Trace/ckpts/nli-deberta-v3-small
 
-REPLAY_PATH="$REPLAY_SMOKE" OPD_CKPT="$OPD_SMOKE" OUT_DIR="$GRPO_SMOKE_OUT" TEXT_REWARD_MODE=nli NLI_MODEL_PATH="$NLI_MODEL_PATH" NLI_DEVICE=cpu EXPLANATION_WEIGHT=0.3 MAX_SAMPLES=3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/grpo.sh
+export GRPO_NLI_SMOKE="$EXP_ROOT/grpo_nli_smoke"
+REPLAY_PATH="$GRPO_REPLAY_SMOKE" OPD_CKPT="$OPD_CKPT" OUT_DIR="$GRPO_NLI_SMOKE" TEXT_REWARD_MODE=nli NLI_MODEL_PATH="$NLI_MODEL_PATH" NLI_DEVICE=cpu EXPLANATION_WEIGHT=0.3 MAX_SAMPLES=3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/grpo.sh
 ```
 
-### 6.3 正式 GRPO
+## 8. 正式 GRPO
+
+正式训练只选一种模式，不要先后训练两轮。优先使用 `nli`；速度不足时改成
+`TEXT_REWARD_MODE=lexical`，并删除命令中的 NLI 参数。
 
 ```bash
 export GRPO_OUT="$EXP_ROOT/grpo"
-REPLAY_PATH="$REPLAY_PATH" OPD_CKPT="$OPD_CKPT" OUT_DIR="$GRPO_OUT" TEXT_REWARD_MODE=nli NLI_MODEL_PATH="$NLI_MODEL_PATH" NLI_DEVICE=cpu EXPLANATION_WEIGHT=0.3 GROUP_SIZE=4 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=4 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/grpo.sh
+REPLAY_PATH="$GRPO_REPLAY" OPD_CKPT="$OPD_CKPT" OUT_DIR="$GRPO_OUT" TEXT_REWARD_MODE=nli NLI_MODEL_PATH="$NLI_MODEL_PATH" NLI_DEVICE=cpu EXPLANATION_WEIGHT=0.3 GROUP_SIZE=4 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=4 CLEAN=1 NPROC_PER_NODE=1 bash Trace/scripts/train/grpo.sh
 export FINAL_CKPT="$GRPO_OUT"
 ```
 
 关注日志：`grpo_exp_reward`、`grpo_text_graph_precision`、
-`grpo_text_graph_recall`、`grpo_text_contradiction`。NLI 速度不足时使用
-`TEXT_REWARD_MODE=lexical`。
+`grpo_text_graph_recall`、`grpo_text_contradiction`。
 
-## 7. candidate-only 测试
+当前为 `num_iterations=1` 的单次更新 masked GRPO；组内优势和 reference KL
+有效，PPO clipping 在首次更新时不提供额外约束。
+
+## 9. candidate-only 测试
 
 正式：
 

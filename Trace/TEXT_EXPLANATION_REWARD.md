@@ -10,6 +10,8 @@ DeMamba proposals → ref2 SFT → paired-teacher precheck → OPD → GRPO → 
 
 本次只替换 GRPO 的文字解释奖励。定位奖励、格式奖励、SFT 和 OPD 均不改变；OPD 仍只蒸馏 paired teacher 的事件/时间结构，不蒸馏自由解释文本。
 
+该奖励衡量生成解释与训练集参考事实的一致性，不读取视频，因此不宣称验证视觉真实性。定位 IoU gate 用于避免定位错误时照抄参考解释得分。
+
 ## 2. 参考工作
 
 - CIDEr 与 SCST：caption 模型可直接把不可微的整句指标作为 RL reward，不需要生成式裁判。[1][2]

@@ -576,15 +576,29 @@ class TraceGRPOTrainer(TraceTrainer):
         for rollout_index, (response, rollout) in enumerate(zip(responses, parsed)):
             if not response:
                 continue
+            # This trainer performs one optimizer update per freshly sampled
+            # group. Thus old==current in value on this first update (the
+            # on-policy num_iterations=1 case); the detached ratio still gives
+            # the group-relative policy gradient, while clipping is inert.
             old_logprobs, _, _ = self._trace_policy_terms(model, prompt, response, video, modal, timestamps, requires_grad=False)
             _, _, reference_logits = self._trace_policy_terms(reference, prompt, response, video, modal, timestamps, requires_grad=False)
             current_logprobs, kinds, current_logits = self._trace_policy_terms(model, prompt, response, video, modal, timestamps, requires_grad=True)
             masks = action_component_masks(response, spec)
             component_to_advantage = advantages if self.args.grpo_structure_aware else {"total": advantages["total"]}
+            component_weights = {
+                "localization": self.args.grpo_localization_weight,
+                "explanation": self.args.grpo_explanation_weight,
+                "format": self.args.grpo_format_weight,
+                "total": 1.0,
+            }
             for component, component_advantage in component_to_advantage.items():
-                if component_advantage is None:
+                objective_weight = component_weights[component]
+                if component_advantage is None or objective_weight == 0:
                     continue
-                advantage = component_advantage[rollout_index]
+                # Per-component normalization removes every positive scalar
+                # applied before normalization. Apply the configured objective
+                # weight afterwards so 1.0/0.3/0.1 has its stated meaning.
+                advantage = objective_weight * component_advantage[rollout_index]
                 mask = masks[component] if self.args.grpo_structure_aware else [1.0] * len(response)
                 for old, current, weight in zip(old_logprobs, current_logprobs, mask):
                     if old is None or current is None or weight == 0:
@@ -839,15 +853,26 @@ class TraceOPDTrainer(TraceGRPOTrainer):
             if not self._cached_teacher_is_reliable(target):
                 continue
             reliable += 1
-            use_guidance = bool(target.get("is_positive")) and random.random() < self.args.opd_guided_positive_fraction
-            if use_guidance:
-                response = self._guided_rollout(model, teacher, prompt, teacher_prompt, videos[row], teacher_videos[row], modals[row], timestamps[row])
-                guided += 1
-            else:
-                response = self._rollout(model, prompt, videos[row], modals[row], timestamps[row])
+            # First sample from the deployment policy. Guidance is a recovery
+            # path only for a failed positive trajectory, not a random
+            # replacement that can hide whether the student actually failed.
+            response = self._rollout(model, prompt, videos[row], modals[row], timestamps[row])
             if not response:
                 continue
             disagreement_weight, disagreement_kind = self._disagreement_weight(response, target, spec)
+            recoverable_failure = disagreement_kind in {
+                "false_refusal", "positive_format_error", "positive_localization_error",
+            }
+            if (recoverable_failure
+                    and random.random() < self.args.opd_guided_positive_fraction):
+                response = self._guided_rollout(
+                    model, teacher, prompt, teacher_prompt, videos[row],
+                    teacher_videos[row], modals[row], timestamps[row],
+                )
+                guided += 1
+                if not response:
+                    continue
+                disagreement_weight, disagreement_kind = self._disagreement_weight(response, target, spec)
             disagreement_counts[disagreement_kind] = disagreement_counts.get(disagreement_kind, 0) + 1
             _, kinds, student_positions = self._trace_policy_terms(model, prompt, response, videos[row], modals[row], timestamps[row], requires_grad=True)
             _, _, teacher_positions = self._trace_policy_terms(teacher, teacher_prompt, response, teacher_videos[row], teacher_modal, timestamps[row], requires_grad=False)

@@ -83,7 +83,7 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --nnodes $WORLD_SIZE \
     --downsample_num 1 \
     --image_aspect_ratio pad \
     --freeze_backbone True \
-    --num_frames 32 \
+    --num_frames 40 \
     --bf16 True \
     --tf32 False \
     --fp16 False \

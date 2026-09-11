@@ -454,75 +454,16 @@ def main(args):
                     window_duration=win_e - win_s,
                 )
                 raw_generations.append(strict_parse.as_dict())
-
-                parsed_segments = []
-                cur_timestamps = []
-                cur_timestamp = []
-                cur_caption = []
-                last_timestamps = None
-
-                for idx in output_ids[0]:
-                    token_id = int(idx)
-                    if token_id < text_sync_id:
-                        cur_caption.append(token_id)
-                    elif token_id == text_sync_id:
-                        pass
-                    elif token_id <= time_token_end:
-                        if len(cur_caption) > 0:
-                             full_caption = safe_decode_text(tokenizer, cur_caption)
-                             if last_timestamps is not None:
-                                 parsed_segments.append({"timestamp": last_timestamps, "caption": full_caption})
-                             last_timestamps = None
-                             cur_caption = []
-
-                        if token_id == time_sync_id:
-                            if len(cur_timestamp) > 0:
-                                cur_timestamps.append(float(''.join(cur_timestamp)))
-                            last_timestamps = cur_timestamps
-                            cur_timestamps = []
-                            cur_timestamp = []
-                        elif token_id == time_sep_id:
-                            if len(cur_timestamp) > 0:
-                                cur_timestamps.append(float(''.join(cur_timestamp)))
-                            cur_timestamp = []
-                        else:
-                            cur_timestamp.append(model.get_model().time_tokenizer.decode(token_id - time_token_start))
-                    else:
-                        pass
-
-                if len(cur_caption) > 0:
-                    full_caption = safe_decode_text(tokenizer, cur_caption)
-                    if last_timestamps is not None:
-                        parsed_segments.append({"timestamp": last_timestamps, "caption": full_caption})
-                elif last_timestamps is not None:
-                    parsed_segments.append({"timestamp": last_timestamps, "caption": ""})
-
-                # Parse the model output.
-                abs_s, abs_e = -99, -99
-                response_text = ""
-                
-                if len(parsed_segments) > 0:
-                    item_res = parsed_segments[0]
-                    ts = item_res["timestamp"]
-                    response_text = item_res["caption"]
-                    if len(ts) >= 2:
-                        rel_s, rel_e = ts[0], ts[1]
-                        abs_s = win_s + rel_s
-                        abs_e = win_s + rel_e
-                
-                if abs_s != -99 and abs_e != -99:
-                    model_inference_segments.append([abs_s, abs_e])
-                    model_inference_responses.append(response_text)
-                else:
-                    # No prediction -> mark as invalid; will be filtered out below.
-                    model_inference_segments.append([-99, -99])
-                    model_inference_responses.append("")
-                
-                # print(win_s, win_e, abs_s, abs_e)
+                # Training rewards and evaluation must consume the same strict
+                # parser semantics. Preserve every valid event rather than
+                # reparsing and silently keeping only the first timestamp.
+                if strict_parse.status == VALID_EVENT:
+                    for rel_s, rel_e in strict_parse.segments:
+                        model_inference_segments.append([win_s + rel_s, win_s + rel_e])
+                        model_inference_responses.append(strict_parse.caption)
             except Exception:
                 traceback.print_exc()
                 print(f'generate for video {vid_path} segment {segment} failed')
-                model_inference_segments.append([-99, -99])
                 raw_generations.append({"status": FORMAT_FAILURE, "failure_reasons": ["generation_exception"], "raw_token_ids": []})
 
         # Build the output item.
@@ -530,37 +471,27 @@ def main(args):
         # Keep the original annotations untouched.
         final_output['annotations'] = item.get("annotations", [])
         
-        # Filter out invalid segments.
-        valid_segments = []
-        valid_responses = []
-        for s, r in zip(model_inference_segments, model_inference_responses):
-            if s != [-99, -99]:
-                valid_segments.append(s)
-                valid_responses.append(r)
-        
+        valid_segments = model_inference_segments
+        valid_responses = model_inference_responses
+        statuses = set(entry["status"] for entry in raw_generations)
         model_inference = {
             "segment": valid_segments,
             "response": valid_responses,
-            # Retain the legacy fake/real field below for existing downstream
-            # scripts, but expose the raw parser result so malformed output is
-            # never mistaken for a semantically correct no-forgery decision.
             "raw_generation": raw_generations,
             "parse_status": [entry["status"] for entry in raw_generations],
         }
-        
-        if len(valid_segments) == 0:
-            model_inference["type"] = "real"
-        else:
+
+        if VALID_EVENT in statuses:
             model_inference["type"] = "fake"
-        statuses = set(model_inference["parse_status"])
-        if FORMAT_FAILURE in statuses:
-            model_inference["decision_status"] = "contains_format_failure"
         elif statuses == {VALID_NO_EVENT}:
+            model_inference["type"] = "real"
             model_inference["decision_status"] = "semantic_no_event"
-        elif VALID_EVENT in statuses:
-            model_inference["decision_status"] = "semantic_event"
         else:
-            model_inference["decision_status"] = "unknown"
+            # Invalid output is not a semantic real prediction.
+            model_inference["type"] = "invalid"
+            model_inference["decision_status"] = "format_failure"
+        if VALID_EVENT in statuses:
+            model_inference["decision_status"] = "semantic_event"
             
         final_output['model_inference'] = model_inference
 
