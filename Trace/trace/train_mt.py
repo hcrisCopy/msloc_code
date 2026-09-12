@@ -197,6 +197,10 @@ class TrainingArguments(transformers.TrainingArguments):
     opd_guided_positive_fraction: float = field(default=0.0)
     opd_guided_alpha: float = field(default=0.5)
     opd_guided_max_tokens: int = field(default=16)
+    opd_guided_loss_coef: float = field(
+        default=0.25,
+        metadata={"help": "Auxiliary guided-trajectory KL coefficient; original student-rollout KL is always retained."},
+    )
     opd_teacher_iou_gate: float = field(default=0.3)
     opd_teacher_model_path: Optional[str] = field(default=None)
     opd_smoke_allow_unvalidated_teacher: bool = field(
@@ -2355,6 +2359,8 @@ def train(attn_implementation="eager"):
             raise ValueError("--opd_guided_positive_fraction must be in [0, 1]")
         if not (0.0 <= training_args.opd_guided_alpha <= 1.0):
             raise ValueError("--opd_guided_alpha must be in [0, 1]")
+        if training_args.opd_guided_loss_coef < 0.0:
+            raise ValueError("--opd_guided_loss_coef must be non-negative")
         if not (0.0 <= training_args.opd_disagreement_iou_gate <= 1.0):
             raise ValueError("--opd_disagreement_iou_gate must be in [0, 1]")
         for name in (

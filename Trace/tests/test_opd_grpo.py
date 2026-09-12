@@ -55,6 +55,23 @@ class OpdGrpoTests(unittest.TestCase):
         self.assertGreater(reward.localization, 0.9)
         self.assertEqual(reward.format, 1.0)
 
+    def test_zero_iou_segments_are_not_matched_or_rewarded(self):
+        self.assertEqual(opd.match_segments([(0.0, 1.0)], [(2.0, 3.0)]), [])
+        parsed = opd.ParsedTraceOutput(
+            opd.VALID_EVENT, segments=[(0.0, 1.0)], caption="unrelated event"
+        )
+        reward = opd.score_trace_output(
+            parsed,
+            target_segments=[(2.0, 3.0)],
+            candidate_video="candidate.mp4",
+            proposal=(0.0, 4.0),
+            evidence=None,
+            sample_id="zero-iou",
+            config=opd.RewardConfig(),
+        )
+        self.assertEqual(reward.matched_iou, 0.0)
+        self.assertEqual(reward.localization, 0.0)
+
     def test_invalid_is_not_a_real_prediction(self):
         parsed = opd.parse_trace_tokens([self.spec.text_sync_id, 3], self.spec, lambda _: "No forgery.", window_duration=2.0)
         self.assertEqual(parsed.status, opd.FORMAT_FAILURE)

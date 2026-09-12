@@ -843,7 +843,7 @@ class TraceOPDTrainer(TraceGRPOTrainer):
                 "Do not mix missing-reference samples into OPD; retain them for SFT/GRPO instead."
             )
         teacher = self._teacher_on_actor_device(model)
-        distillation_terms, reliable, guided = [], 0, 0
+        distillation_terms, reliable, guided, structural_token_count = [], 0, 0, 0
         disagreement_counts = {}
         spec = self._token_spec(model)
         for row, target in enumerate(targets):
@@ -860,36 +860,74 @@ class TraceOPDTrainer(TraceGRPOTrainer):
             if not response:
                 continue
             disagreement_weight, disagreement_kind = self._disagreement_weight(response, target, spec)
+            # The deployment-policy rollout determines both the disagreement
+            # category and its weight.  Always retain its KL so a false refusal
+            # cannot disappear merely because guidance later recovers an event.
+            _, kinds, student_positions = self._trace_policy_terms(
+                model, prompt, response, videos[row], modals[row], timestamps[row], requires_grad=True,
+            )
+            _, _, teacher_positions = self._trace_policy_terms(
+                teacher, teacher_prompt, response, teacher_videos[row], teacher_modal, timestamps[row], requires_grad=False,
+            )
+            structural_masks = action_component_masks(response, spec)["localization"]
+            original_terms = []
+            for kind, mask, student_position, teacher_position in zip(
+                    kinds, structural_masks, student_positions, teacher_positions):
+                if mask == 0 or student_position is None or teacher_position is None:
+                    continue
+                reverse_kl = self._opd_reverse_kl(student_position, teacher_position, kind)
+                if reverse_kl is not None:
+                    original_terms.append(reverse_kl)
+            structural_token_count += len(original_terms)
+            trajectory_loss = (
+                disagreement_weight * torch.stack(original_terms).mean()
+                if original_terms else None
+            )
+            disagreement_counts[disagreement_kind] = disagreement_counts.get(disagreement_kind, 0) + 1
+
             recoverable_failure = disagreement_kind in {
                 "false_refusal", "positive_format_error", "positive_localization_error",
             }
             if (recoverable_failure
                     and random.random() < self.args.opd_guided_positive_fraction):
-                response = self._guided_rollout(
+                guided_response = self._guided_rollout(
                     model, teacher, prompt, teacher_prompt, videos[row],
                     teacher_videos[row], modals[row], timestamps[row],
                 )
                 guided += 1
-                if not response:
-                    continue
-                disagreement_weight, disagreement_kind = self._disagreement_weight(response, target, spec)
-            disagreement_counts[disagreement_kind] = disagreement_counts.get(disagreement_kind, 0) + 1
-            _, kinds, student_positions = self._trace_policy_terms(model, prompt, response, videos[row], modals[row], timestamps[row], requires_grad=True)
-            _, _, teacher_positions = self._trace_policy_terms(teacher, teacher_prompt, response, teacher_videos[row], teacher_modal, timestamps[row], requires_grad=False)
-            structural_masks = action_component_masks(response, spec)["localization"]
-            for kind, mask, student_position, teacher_position in zip(kinds, structural_masks, student_positions, teacher_positions):
-                if mask == 0 or student_position is None or teacher_position is None:
-                    continue
-                reverse_kl = self._opd_reverse_kl(student_position, teacher_position, kind)
-                if reverse_kl is not None:
-                    distillation_terms.append(disagreement_weight * reverse_kl)
+                if guided_response:
+                    _, guided_kinds, guided_student_positions = self._trace_policy_terms(
+                        model, prompt, guided_response, videos[row], modals[row], timestamps[row], requires_grad=True,
+                    )
+                    _, _, guided_teacher_positions = self._trace_policy_terms(
+                        teacher, teacher_prompt, guided_response, teacher_videos[row], teacher_modal, timestamps[row], requires_grad=False,
+                    )
+                    guided_masks = action_component_masks(guided_response, spec)["localization"]
+                    guided_terms = []
+                    for kind, mask, student_position, teacher_position in zip(
+                            guided_kinds, guided_masks, guided_student_positions, guided_teacher_positions):
+                        if mask == 0 or student_position is None or teacher_position is None:
+                            continue
+                        reverse_kl = self._opd_reverse_kl(student_position, teacher_position, kind)
+                        if reverse_kl is not None:
+                            guided_terms.append(reverse_kl)
+                    structural_token_count += len(guided_terms)
+                    if guided_terms:
+                        guided_loss = (
+                            self.args.opd_guided_loss_coef
+                            * disagreement_weight
+                            * torch.stack(guided_terms).mean()
+                        )
+                        trajectory_loss = guided_loss if trajectory_loss is None else trajectory_loss + guided_loss
+            if trajectory_loss is not None:
+                distillation_terms.append(trajectory_loss)
         opd_loss = torch.stack(distillation_terms).mean() if distillation_terms else sft_loss * 0.0
         loss = sft_loss + self.args.opd_weight * opd_loss
         self._opd_metrics = {
             "opd_reverse_kl": float(opd_loss.detach().cpu()),
             "opd_reliable_teacher_rate": reliable / max(1, len(targets)),
             "opd_guided_rate": guided / max(1, len(targets)),
-            "opd_structural_token_count": len(distillation_terms),
+            "opd_structural_token_count": structural_token_count,
             "opd_false_refusal_rollouts": disagreement_counts.get("false_refusal", 0),
             "opd_positive_localization_error_rollouts": disagreement_counts.get("positive_localization_error", 0),
             "opd_negative_error_rollouts": disagreement_counts.get("negative_error", 0),

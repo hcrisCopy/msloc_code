@@ -226,6 +226,7 @@ def match_segments(
         (temporal_iou(p, g), p_idx, g_idx)
         for p_idx, p in enumerate(predicted)
         for g_idx, g in enumerate(target)
+        if temporal_iou(p, g) > 0.0
     ]
     candidates.sort(reverse=True)
     used_pred, used_gt, matches = set(), set(), []

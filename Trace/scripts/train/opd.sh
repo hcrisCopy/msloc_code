@@ -53,7 +53,7 @@ torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-8} "$TRACE_DIR/trace/tr
   --opd_disagreement_iou_gate ${OPD_DISAGREEMENT_IOU_GATE:-0.30} \
   --opd_false_refusal_weight ${FALSE_REFUSAL_WEIGHT:-1.0} --opd_positive_error_weight ${POSITIVE_ERROR_WEIGHT:-0.8} --opd_negative_error_weight ${NEGATIVE_ERROR_WEIGHT:-0.8} \
   --opd_positive_anchor_weight ${POSITIVE_ANCHOR_WEIGHT:-0.2} --opd_negative_anchor_weight ${NEGATIVE_ANCHOR_WEIGHT:-0.2} \
-  --opd_guided_positive_fraction ${GUIDED_POSITIVE_FRACTION:-1.0} --opd_guided_alpha ${GUIDED_ALPHA:-0.5} --opd_guided_max_tokens ${GUIDED_MAX_TOKENS:-16} \
+  --opd_guided_positive_fraction ${GUIDED_POSITIVE_FRACTION:-1.0} --opd_guided_alpha ${GUIDED_ALPHA:-0.5} --opd_guided_max_tokens ${GUIDED_MAX_TOKENS:-16} --opd_guided_loss_coef ${GUIDED_LOSS_COEF:-0.25} \
   --bnd_ratio 0.2 --bnd_frames 16 --seg_frames 8 --bf16 True --output_dir "$OUT_DIR" \
   --num_train_epochs ${EPOCHS:-1} --per_device_train_batch_size ${BATCH_SIZE:-1} \
   --gradient_accumulation_steps ${GRAD_ACCUM:-4} --learning_rate ${LR:-2e-6} \
