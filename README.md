@@ -1,5 +1,7 @@
 # MSLoc：XCLIP 神经元探测与 DeMamba 训练实验
 
+更多 DINOv2/DINOv3 与 ActivityForensics 运行说明，请参阅 [补充说明](SupplyREADME.md)。
+
 本说明覆盖当前第一阶段实验：冻结本地预训练的 XCLIP，利用真假视频对探测三类敏感神经元，将最终固定的 768 维特征直接送入 Mamba 和四分类头训练，并与 XCLIP baseline 对比。
 
 所有命令均在服务器的 `MSLoc_code` 目录执行；命令中的所有路径均为相对路径。数据、预训练模型、缓存、中间结果、模型权重、评测与可视化结果均写入同级目录 `../MSLoc_data`。
@@ -246,5 +248,3 @@ python DeMamba/extract_subset_frames.py \
   --fps 8 \
   --num-workers 8
 ```
-
-更多 DINOv2/DINOv3 与 ActivityForensics 运行说明，请参阅 [补充说明](SupplyREADME.md)。
