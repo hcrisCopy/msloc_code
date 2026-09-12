@@ -246,3 +246,5 @@ python DeMamba/extract_subset_frames.py \
   --fps 8 \
   --num-workers 8
 ```
+
+更多 DINOv2/DINOv3 与 ActivityForensics 运行说明，请参阅 [补充说明](SupplyREADME.md)。
