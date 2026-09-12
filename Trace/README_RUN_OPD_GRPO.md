@@ -123,42 +123,56 @@ REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/opd_paired_replay_smoke.jso
 
 输出：`../MSLoc_data/Trace/experiments/opd_grpo/opd_smoke/`。teacher 不可靠时 OPD KL 可以为 0，此命令只检查程序能否运行。
 
-## 6. GRPO 小样本
+## 6. GRPO
 
-作用：检查定位、格式、文字解释三类奖励。文字奖励只有定位 IoU 达标后才发放。
+作用：在 candidate-only 分布上优化定位、格式、文字解释三类奖励。文字奖励只有定位 IoU 达标后才发放。先运行所选方法的小样本命令；通过后，再从正式 OPD 模型开始正式训练。Lexical 和 NLI 二选一，不连续训练。
 
-Lexical：关键词、同义词和 token F1，不加载额外模型。
+### 6.1 Lexical
+
+关键词、同义词和 token F1，不加载额外模型。
+
+正式：
 
 ```bash
-REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/grpo_candidate_replay_smoke.json OPD_CKPT=../MSLoc_data/Trace/experiments/opd_grpo/opd_smoke OUT_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo_lexical_smoke TEXT_REWARD_MODE=lexical EXPLANATION_WEIGHT=0.3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 MAX_SAMPLES=3 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 NPROC_PER_NODE=8 CLEAN=1 bash Trace/scripts/train/grpo.sh
+REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/grpo_candidate_replay.json OPD_CKPT=../MSLoc_data/Trace/experiments/opd_grpo/opd OUT_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo_lexical TEXT_REWARD_MODE=lexical TEXT_MAX_WORDS=80 EXPLANATION_WEIGHT=0.3 GROUP_SIZE=4 MAX_NEW_TOKENS=128 TEMPERATURE=0.7 KL_COEF=0.02 SFT_COEF=0.1 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=4 NUM_WORKERS=4 NPROC_PER_NODE=8 CLEAN=1 bash Trace/scripts/train/grpo.sh
+```
+
+输出：`../MSLoc_data/Trace/experiments/opd_grpo/grpo_lexical/`。
+
+小样本：
+
+```bash
+REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/grpo_candidate_replay_smoke.json OPD_CKPT=../MSLoc_data/Trace/experiments/opd_grpo/opd_smoke OUT_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo_lexical_smoke TEXT_REWARD_MODE=lexical TEXT_MAX_WORDS=80 EXPLANATION_WEIGHT=0.3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 TEMPERATURE=0.7 KL_COEF=0.02 SFT_COEF=0.1 MAX_SAMPLES=3 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 NPROC_PER_NODE=8 CLEAN=1 bash Trace/scripts/train/grpo.sh
 ```
 
 输出：`../MSLoc_data/Trace/experiments/opd_grpo/grpo_lexical_smoke/`。
 
-NLI：保留 lexical 分数，再用冻结的小型 NLI 模型检查语义一致和矛盾；NLI 不训练。
+### 6.2 NLI
+
+保留 Lexical 分数，再用冻结的小型 NLI 模型检查语义一致和矛盾；NLI 不训练。
+
+正式：
 
 ```bash
-REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/grpo_candidate_replay_smoke.json OPD_CKPT=../MSLoc_data/Trace/experiments/opd_grpo/opd_smoke OUT_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli_smoke TEXT_REWARD_MODE=nli NLI_MODEL_PATH=../MSLoc_data/Trace/ckpts/nli-deberta-v3-small NLI_DEVICE=cuda NLI_BATCH_SIZE=32 EXPLANATION_WEIGHT=0.3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 MAX_SAMPLES=3 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 NPROC_PER_NODE=8 CLEAN=1 bash Trace/scripts/train/grpo.sh
+REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/grpo_candidate_replay.json OPD_CKPT=../MSLoc_data/Trace/experiments/opd_grpo/opd OUT_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli TEXT_REWARD_MODE=nli NLI_MODEL_PATH=../MSLoc_data/Trace/ckpts/nli-deberta-v3-small NLI_DEVICE=cuda NLI_BATCH_SIZE=32 TEXT_MAX_WORDS=80 EXPLANATION_WEIGHT=0.3 GROUP_SIZE=4 MAX_NEW_TOKENS=128 TEMPERATURE=0.7 KL_COEF=0.02 SFT_COEF=0.1 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=4 NUM_WORKERS=4 NPROC_PER_NODE=8 CLEAN=1 bash Trace/scripts/train/grpo.sh
 ```
 
-输出：`../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli_smoke/`。两种模式是独立检查，不是连续训练。
+输出：`../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli/`。关注 `grpo_loc_reward`、`grpo_exp_reward`、`grpo_fmt_reward` 和 `grpo_text_contradiction`。
 
-## 7. 正式 GRPO
-
-作用：在 candidate-only 部署分布上优化三类奖励。正式实验只选一种文字奖励；默认使用 NLI，速度不足时使用 Lexical。
+小样本：
 
 ```bash
-REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/grpo_candidate_replay.json OPD_CKPT=../MSLoc_data/Trace/experiments/opd_grpo/opd OUT_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo TEXT_REWARD_MODE=nli NLI_MODEL_PATH=../MSLoc_data/Trace/ckpts/nli-deberta-v3-small NLI_DEVICE=cuda NLI_BATCH_SIZE=32 TEXT_MAX_WORDS=80 EXPLANATION_WEIGHT=0.3 GROUP_SIZE=4 MAX_NEW_TOKENS=128 TEMPERATURE=0.7 KL_COEF=0.02 SFT_COEF=0.1 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=4 NUM_WORKERS=4 NPROC_PER_NODE=8 CLEAN=1 bash Trace/scripts/train/grpo.sh
+REPLAY_PATH=../MSLoc_data/Trace/experiments/opd_grpo/grpo_candidate_replay_smoke.json OPD_CKPT=../MSLoc_data/Trace/experiments/opd_grpo/opd_smoke OUT_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli_smoke TEXT_REWARD_MODE=nli NLI_MODEL_PATH=../MSLoc_data/Trace/ckpts/nli-deberta-v3-small NLI_DEVICE=cuda NLI_BATCH_SIZE=32 TEXT_MAX_WORDS=80 EXPLANATION_WEIGHT=0.3 GROUP_SIZE=2 MAX_NEW_TOKENS=64 TEMPERATURE=0.7 KL_COEF=0.02 SFT_COEF=0.1 MAX_SAMPLES=3 EPOCHS=1 BATCH_SIZE=1 GRAD_ACCUM=1 NUM_WORKERS=0 SAVE_STEPS=1 NPROC_PER_NODE=8 CLEAN=1 bash Trace/scripts/train/grpo.sh
 ```
 
-输出：`../MSLoc_data/Trace/experiments/opd_grpo/grpo/`。关注 `grpo_loc_reward`、`grpo_exp_reward`、`grpo_fmt_reward` 和 `grpo_text_contradiction`。
+输出：`../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli_smoke/`。
 
-## 8. candidate-only 测试
+## 7. candidate-only 测试
 
 作用：最终模型只看 candidate proposal，生成定位和解释。测试 proposal 默认位于 `../MSLoc_data/DeMamba/full/method/eval/predictions.json`。
 
 ```bash
-MODEL_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo TEST_ANNO_FILE=../MSLoc_data/DeMamba/full/method/eval/predictions.json RAW_ANNO_FILE=../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json VIDEO_DIR=../MSLoc_data/data/Tasle-CoT-10K/videos OUTPUT_DIR=../MSLoc_data/Trace/inference_results/grpo_test NUM_FRAME=40 MAX_NEW_TOKENS=512 SAMPLE_NUM=-1 NUM_GPUS=8 CLEAN=1 bash Trace/scripts/eval/ref2_eval.sh
+MODEL_DIR=../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli TEST_ANNO_FILE=../MSLoc_data/DeMamba/full/method/eval/predictions.json RAW_ANNO_FILE=../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json VIDEO_DIR=../MSLoc_data/data/Tasle-CoT-10K/videos OUTPUT_DIR=../MSLoc_data/Trace/inference_results/grpo_nli_test NUM_FRAME=40 MAX_NEW_TOKENS=512 SAMPLE_NUM=-1 NUM_GPUS=8 CLEAN=1 bash Trace/scripts/eval/ref2_eval.sh
 ```
 
-输出：`../MSLoc_data/Trace/inference_results/grpo_test/fmt_aigc_test_f40_result.json`。对比 SFT、OPD 时分别替换 `MODEL_DIR` 和 `OUTPUT_DIR`；小样本测试把 `SAMPLE_NUM=-1` 改为 `3`。
+输出：`../MSLoc_data/Trace/inference_results/grpo_nli_test/fmt_aigc_test_f40_result.json`。若选择 Lexical，将 `MODEL_DIR` 改为 `grpo_lexical`，同时换一个 `OUTPUT_DIR`。小样本测试把 `SAMPLE_NUM=-1` 改为 `3`。
