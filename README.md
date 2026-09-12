@@ -1,6 +1,7 @@
 # MSLoc：XCLIP 神经元探测与 DeMamba 训练实验
 
-更多 DINOv2/DINOv3 与 ActivityForensics 运行说明，请参阅 [补充说明](SupplyREADME.md)。
+小模型阶段的DINOv2/DINOv3实验 与 DINOv2/DINOv3/XClip的ActivityForensics泛化测试 运行说明，请参阅 [补充说明](SupplyREADME.md)。
+基于XClip的大模型阶段，结合SFT、OPD、GRPO后训练技术，其运行说明，请参阅[运行指令](msloc_code\Trace\README_RUN_OPD_GRPO.md)
 
 本说明覆盖当前第一阶段实验：冻结本地预训练的 XCLIP，利用真假视频对探测三类敏感神经元，将最终固定的 768 维特征直接送入 Mamba 和四分类头训练，并与 XCLIP baseline 对比。
 
