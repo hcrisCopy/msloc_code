@@ -1,149 +1,248 @@
-# DINOv2 ViT-B/14 + DeMamba：下载与运行
+# MSLoc：XCLIP 神经元探测与 DeMamba 训练实验
 
-所有命令均从项目根目录 `MSLoc_code` 执行
+本说明覆盖当前第一阶段实验：冻结本地预训练的 XCLIP，利用真假视频对探测三类敏感神经元，将最终固定的 768 维特征直接送入 Mamba 和四分类头训练，并与 XCLIP baseline 对比。
 
-## 1. DINOv2
+所有命令均在服务器的 `MSLoc_code` 目录执行；命令中的所有路径均为相对路径。数据、预训练模型、缓存、中间结果、模型权重、评测与可视化结果均写入同级目录 `../MSLoc_data`。
 
-### 1.1 权重下载
+## 1. 环境安装与检查
 
 ```bash
-hf download facebook/dinov2-base \
-  --local-dir ../MSLoc_data/DeMamba/pretrained_weights/dinov2_hf
+conda create -n msloc python=3.10 -y
+conda activate msloc
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip install -r DeMamba/requirements.txt
 ```
 
-### 1.2 正式神经元探测、训练与原论文测试集评测
+安装 FFmpeg：
 
 ```bash
-bash DeMamba/run_dinov2_neuron_pipeline.sh
+sudo apt-get update
+sudo apt-get install -y ffmpeg
+ffmpeg -version
 ```
 
-### 1.3 评测新 benchmark：ActivityForensics
-
-下面的命令直接读取 ActivityForensics 原始视频，不需要预先抽帧。配置中的
-`dinov2_hf_model_path`、神经元索引路径和 checkpoint 路径与
-`DeMamba/run_dinov2_neuron_pipeline.sh` 保持一致。
+确认本地 XCLIP 可以离线加载：
 
 ```bash
-python DeMamba/eval_activityforensics.py \
-  --config DeMamba/configs/DINOv2_Tasle_neurons.yaml \
-  --model-path ../MSLoc_data/DeMamba/results/dinov2_neurons_4/best_acc.pth \
-  --annotation-dir ../MSLoc_data/ActivityForensics \
-  --video-root ../MSLoc_data/ActivityForensics \
-  --output-dir ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics \
+python -c "from transformers import XCLIPVisionModel; m=XCLIPVisionModel.from_pretrained('../MSLoc_data/DeMamba/pretrained_weights/xclip-base-patch16', local_files_only=True); print('offline XCLIP loaded:', m.config.hidden_size, m.config.num_hidden_layers)"
+```
+
+预期输出包含 `offline XCLIP loaded: 768 12`。
+
+
+## 2. 下载数据集和模型权重
+
+```bash
+cd ..
+modelscope login --token ms-412c41b7-1f64-483e-9ab2-f81cc7c04525
+modelscope download --dataset L67plus/TASLE --local-dir ./
+cat MSLoc_assets.tar.gz.part-* > MSLoc_data.tar.gz
+tar -xzf MSLoc_data.tar.gz
+```
+
+解压后目录如下，**注意文件夹名称需要改成 `MSLoc_data`**
+
+```text
+MSLoc_data/
+├── data
+├── DeMamba
+└── Trace
+```
+
+## 3. 抽帧
+
+```bash
+python DeMamba/Preprocess/video2frame.py \
+  --input_root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --output_root ../MSLoc_data/DeMamba/video_frames \
+  --num_workers 8
+```
+
+## 4. 生成全量配置文件
+
+```bash
+mkdir -p ../MSLoc_data/DeMamba/full/configs
+
+cat > ../MSLoc_data/DeMamba/full/configs/xclip_baseline_full.yaml <<'YAML'
+model: 'XCLIP_DeMamba_4'
+tuning_mode: 'lp'
+task: 'many2many'
+
+save_dir: '../MSLoc_data/DeMamba/full/baseline/results'
+xclip_model_path: '../MSLoc_data/DeMamba/pretrained_weights/xclip-base-patch16'
+
+max_epoch: 10
+bath_per_epoch: 1000
+train_batch_size: 2
+val_batch_size: 2
+num_workers: 2
+lr: 0.000001
+
+train_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json'
+test_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json'
+dataset_base_path: '../MSLoc_data/DeMamba/video_frames'
+window_length: 2.0
+frames_per_window: 8
+mode: 'four_class'
+transform_config: {
+  crop_youku: True,
+  normalization: 'clip'
+}
+YAML
+
+cat > ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml <<'YAML'
+model: 'XCLIP_NeuronDeMamba_4'
+tuning_mode: 'sft'
+task: 'many2many'
+
+save_dir: '../MSLoc_data/DeMamba/full/method/results'
+neuron_indices_path: '../MSLoc_data/DeMamba/full/method/neuron_probe/xclip_neuron_indices.json'
+xclip_model_path: '../MSLoc_data/DeMamba/pretrained_weights/xclip-base-patch16'
+
+max_epoch: 10
+bath_per_epoch: 1000
+train_batch_size: 32
+val_batch_size: 32
+num_workers: 32
+lr: 0.000001
+
+train_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json'
+test_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json'
+dataset_base_path: '../MSLoc_data/DeMamba/video_frames'
+window_length: 2.0
+frames_per_window: 8
+mode: 'four_class'
+transform_config: {
+  crop_youku: True,
+  normalization: 'clip'
+}
+YAML
+```
+
+## 5. 构造全量神经元探测对
+
+```bash
+mkdir -p ../MSLoc_data/DeMamba/full/method/neuron_probe
+
+python DeMamba/build_probe_pairs.py \
+  --annotations ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
+  --frame-root ../MSLoc_data/DeMamba/video_frames \
+  --output ../MSLoc_data/DeMamba/full/method/neuron_probe/train_pairs_full.jsonl \
+  --fps 8 \
+  --strict
+```
+
+## 6. 探测并保存最终 768 个神经元
+
+```bash
+python DeMamba/probe_xclip_neurons.py \
+  --pairs ../MSLoc_data/DeMamba/full/method/neuron_probe/train_pairs_full.jsonl \
+  --frame-root ../MSLoc_data/DeMamba/video_frames \
+  --model-path ../MSLoc_data/DeMamba/pretrained_weights/xclip-base-patch16 \
+  --output-dir ../MSLoc_data/DeMamba/full/method/neuron_probe \
+  --final-neuron-count 768 \
+  --crop-youku \
+  --amp \
+  --strict
+```
+
+## 7. 训练与评测
+
+训练使用 PyTorch `DataParallel`。单卡使用 `--device-ids 0`，单机 8 卡使用 `--device-ids 0,1,2,3,4,5,6,7`；不要使用 `torchrun`。
+
+
+### 7.1 Baseline：全维冻结 XCLIP 特征 + Mamba + 分类头
+
+训练：
+
+```bash
+python DeMamba/train.py \
+  --config ../MSLoc_data/DeMamba/full/configs/xclip_baseline_full.yaml \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --train-batch-size 32 \
+  --val-batch-size 32 \
+  --max-epoch 10 \
+  --seed 42
+```
+
+评测：
+
+```bash
+python DeMamba/eval.py \
+  --config ../MSLoc_data/DeMamba/full/configs/xclip_baseline_full.yaml \
+  --model_path ../MSLoc_data/DeMamba/full/baseline/results/best_acc.pth \
+  --output_dir ../MSLoc_data/DeMamba/full/baseline/eval \
   --device-ids 0 \
-  --batch-size 8 \
-  --clean
+  --val-batch-size 16
 ```
 
-DINOv2 使用配置中的 `image_size: 196` 和 `normalization: dinov2`；评测器会自动
-按该配置处理原始视频。数据尚未下载完整时会只评测当前可用视频，并在输出中标记
-`evaluation_scope: partial`；全量下载完成后同一命令会自动评测完整测试集。
+### 7.2 方法：768 个探测神经元 + Mamba + 分类头
 
-完成上述评测后，运行时序提案质量评测：
+训练：
 
 ```bash
-python evaluate_proposal_quality.py \
-  --gt-file ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics/predictions.json \
-  --infer-file ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics/predictions.json \
-  --output-dir ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics/proposal_quality \
-  --iou-thresholds 0.1,0.3,0.5,0.7 \
-  --domain-key tool_domain
-```
-
-## 2. DINOv3
-
-### 2.1 权重下载
-
-```bash
-hf download facebook/dinov3-vitb16-pretrain-lvd1689m --local-dir "../MSLoc_data/DeMamba/pretrained_weights/dinov3_hf"
-```
-
-### 2.2 神经元探测、SFT 训练与原论文测试集评测
-
-```bash
-bash DeMamba/run_dinov3_neuron_pipeline.sh
-```
-
-### 2.3 评测新 benchmark：ActivityForensics
-
-```bash
-python DeMamba/eval_activityforensics.py \
-  --config DeMamba/configs/DINOv3_Tasle_neurons.yaml \
-  --model-path ../MSLoc_data/DeMamba/results/dinov3_neurons_4/best_acc.pth \
-  --annotation-dir ../MSLoc_data/ActivityForensics \
-  --video-root ../MSLoc_data/ActivityForensics \
-  --output-dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics \
-  --device-ids 0 \
-  --batch-size 8 \
-  --clean
-```
-
-完成上述评测后，运行时序 proposal 质量评测：
-
-```bash
-python evaluate_proposal_quality.py \
-  --gt-file ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/predictions.json \
-  --infer-file ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/predictions.json \
-  --output-dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/proposal_quality \
-  --iou-thresholds 0.1,0.3,0.5,0.7 \
-  --domain-key tool_domain
-```
-
-## 3. 原 XCLIP 评测新 benchmark：ActivityForensics
-
-```bash
-python DeMamba/eval_activityforensics.py \
+python DeMamba/train.py \
   --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml \
-  --model-path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth \
-  --annotation-dir ../MSLoc_data/ActivityForensics \
-  --video-root ../MSLoc_data/ActivityForensics \
-  --output-dir ../MSLoc_data/DeMamba/full/method/eval_activityforensics \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --train-batch-size 32 \
+  --val-batch-size 32 \
+  --max-epoch 10 \
+  --seed 42
+```
+
+评测：
+
+```bash
+python DeMamba/eval.py \
+  --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml \
+  --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth \
+  --output_dir ../MSLoc_data/DeMamba/full/method/eval \
   --device-ids 0 \
-  --batch-size 8 \
-  --clean
+  --val-batch-size 16
 ```
-
-完成上述评测后，运行时序提案质量评测：
 
 ```bash
-python evaluate_proposal_quality.py \
-  --gt-file ../MSLoc_data/DeMamba/full/method/eval_activityforensics/predictions.json \
-  --infer-file ../MSLoc_data/DeMamba/full/method/eval_activityforensics/predictions.json \
-  --output-dir ../MSLoc_data/DeMamba/full/method/eval_activityforensics/proposal_quality \
-  --iou-thresholds 0.1,0.3,0.5,0.7 \
-  --domain-key tool_domain
+python evaluate_long.py \
+  --gt_file "../MSLoc_data/test_all_1209_0119_long.json" \
+  --infer_file "../MSLoc_data/DeMamba/full/method/eval/predictions.json"
 ```
 
-## 4. Baseline 评测新 benchmark：ActivityForensics
 
-Baseline 使用 `DeMamba/configs/XCLIP_Tasle.yaml`，checkpoint 使用
-`../MSLoc_data/DeMamba/results/all_Class_4/best_acc.pth`。
+
+## 8. 可视化
 
 ```bash
-python DeMamba/eval_activityforensics.py \
-  --config DeMamba/configs/XCLIP_Tasle.yaml \
-  --model-path ../MSLoc_data/DeMamba/results/all_Class_4/best_acc.pth \
-  --annotation-dir ../MSLoc_data/ActivityForensics \
-  --video-root ../MSLoc_data/ActivityForensics \
-  --output-dir ../MSLoc_data/DeMamba/results/all_Class_4/eval_activityforensics \
-  --device-ids 0 \
-  --batch-size 8 \
-  --clean
+python DeMamba/visualize_xclip_neuron_heatmaps.py \
+  --scores ../MSLoc_data/DeMamba/full/method/neuron_probe/xclip_neuron_scores.npz \
+  --selector ../MSLoc_data/DeMamba/full/method/neuron_probe/xclip_neuron_indices.json \
+  --output-dir ../MSLoc_data/DeMamba/full/method/neuron_probe/visualizations
 ```
 
-完成上述评测后，运行时序提案质量评测：
+预测时间线可视化：
 
 ```bash
-python evaluate_proposal_quality.py \
-  --gt-file ../MSLoc_data/DeMamba/results/all_Class_4/eval_activityforensics/predictions.json \
-  --infer-file ../MSLoc_data/DeMamba/results/all_Class_4/eval_activityforensics/predictions.json \
-  --output-dir ../MSLoc_data/DeMamba/results/all_Class_4/eval_activityforensics/proposal_quality \
-  --iou-thresholds 0.1,0.3,0.5,0.7 \
-  --domain-key tool_domain
+python DeMamba/visualize_predictions.py \
+  --predictions ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --output-dir ../MSLoc_data/DeMamba/full/method/eval/visualizations \
+  --max-videos 30
 ```
 
-三个评测都会输出 TASLE 风格的 `Det_Acc`、`F1Det`、`F1Loc`，以及
-ActivityForensics 的 AP/AR，并分别汇总 all、in-domain、out-of-domain 和各生成器结果。
-`predictions.json` 同时保存真实时序标注和模型预测，因此可同时作为提案质量评测的
-`--gt-file` 与 `--infer-file`。提案质量评测最后首先打印 `Recall`（真实伪造时长被提案
-覆盖的比例），然后打印 Union temporal IoU、Under-coverage 和 Over-coverage。
+## 9. 可选：小样本调试
+
+全量流程不需要调用本节。若只想验证代码和环境，可以使用 `DeMamba/make_paired_subset.py` 生成小样本
+
+```bash
+python DeMamba/make_paired_subset.py \
+  --annotations ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
+  --output ../MSLoc_data/DeMamba/debug/train_20.json \
+  --fake-count 20
+```
+
+```bash
+python DeMamba/extract_subset_frames.py \
+  --annotations ../MSLoc_data/DeMamba/debug/train_20.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --output-root ../MSLoc_data/DeMamba/video_frames \
+  --fps 8 \
+  --num-workers 8
+```
