@@ -19,10 +19,6 @@ bash DeMamba/run_dinov2_neuron_pipeline.sh
 
 ### 1.3 评测新 benchmark：ActivityForensics
 
-下面的命令直接读取 ActivityForensics 原始视频，不需要预先抽帧。配置中的
-`dinov2_hf_model_path`、神经元索引路径和 checkpoint 路径与
-`DeMamba/run_dinov2_neuron_pipeline.sh` 保持一致。
-
 ```bash
 python DeMamba/eval_activityforensics.py \
   --config DeMamba/configs/DINOv2_Tasle_neurons.yaml \
@@ -31,7 +27,7 @@ python DeMamba/eval_activityforensics.py \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics \
   --device-ids 0 \
-  --batch-size 8 \
+  --batch-size 16 \
   --clean
 ```
 
@@ -39,7 +35,7 @@ DINOv2 使用配置中的 `image_size: 196` 和 `normalization: dinov2`；评测
 按该配置处理原始视频。数据尚未下载完整时会只评测当前可用视频，并在输出中标记
 `evaluation_scope: partial`；全量下载完成后同一命令会自动评测完整测试集。
 
-完成上述评测后，运行时序提案质量评测：
+完成上述评测后，运行proposal质量评测：
 
 ```bash
 python evaluate_proposal_quality.py \
@@ -74,11 +70,11 @@ python DeMamba/eval_activityforensics.py \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics \
   --device-ids 0 \
-  --batch-size 8 \
+  --batch-size 16 \
   --clean
 ```
 
-完成上述评测后，运行时序 proposal 质量评测：
+完成上述评测后，运行proposal质量评测：
 
 ```bash
 python evaluate_proposal_quality.py \
@@ -99,11 +95,11 @@ python DeMamba/eval_activityforensics.py \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/full/method/eval_activityforensics \
   --device-ids 0 \
-  --batch-size 8 \
+  --batch-size 16 \
   --clean
 ```
 
-完成上述评测后，运行时序提案质量评测：
+完成上述评测后，运行proposal质量评测：
 
 ```bash
 python evaluate_proposal_quality.py \
@@ -116,9 +112,6 @@ python evaluate_proposal_quality.py \
 
 ## 4. Baseline 评测新 benchmark：ActivityForensics
 
-Baseline 使用 `DeMamba/configs/XCLIP_Tasle.yaml`，checkpoint 使用
-`../MSLoc_data/DeMamba/results/all_Class_4/best_acc.pth`。
-
 ```bash
 python DeMamba/eval_activityforensics.py \
   --config DeMamba/configs/XCLIP_Tasle.yaml \
@@ -127,11 +120,11 @@ python DeMamba/eval_activityforensics.py \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/results/all_Class_4/eval_activityforensics \
   --device-ids 0 \
-  --batch-size 8 \
+  --batch-size 16 \
   --clean
 ```
 
-完成上述评测后，运行时序提案质量评测：
+完成上述评测后，运行proposal质量评测：
 
 ```bash
 python evaluate_proposal_quality.py \
@@ -144,6 +137,5 @@ python evaluate_proposal_quality.py \
 
 三个评测都会输出 TASLE 风格的 `Det_Acc`、`F1Det`、`F1Loc`，以及
 ActivityForensics 的 AP/AR，并分别汇总 all、in-domain、out-of-domain 和各生成器结果。
-`predictions.json` 同时保存真实时序标注和模型预测，因此可同时作为提案质量评测的
-`--gt-file` 与 `--infer-file`。提案质量评测最后首先打印 `Recall`（真实伪造时长被提案
-覆盖的比例），然后打印 Union temporal IoU、Under-coverage 和 Over-coverage。
+`predictions.json` 同时保存真实时序标注和模型预测，因此可同时作为proposal质量评测的
+`--gt-file` 与 `--infer-file`。

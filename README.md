@@ -1,10 +1,16 @@
 # MSLoc：XCLIP 神经元探测与 DeMamba 训练实验
 
-小模型阶段的 DINOv2/DINOv3 神经元探测实验，以及 DINOv2/DINOv3/XCLIP 在 ActivityForensics 上的泛化测试，详见 [补充说明](SupplyREADME.md)。
+本说明覆盖当前第一阶段实验：冻结本地预训练的 XCLIP，利用真假视频对探测伪造敏感神经元，将最终固定的 768 维特征送入后续模块，训练 XCLIP、DeMamba 和分类头
 
-大模型阶段以 XCLIP/DeMamba 生成的时序proposal为基础，依次开展 SFT、OPD 与 GRPO 后训练；运行说明请参阅 [运行指令](Trace/README_RUN_OPD_GRPO.md)。
+注意：本说明中的命令之前已运行，无需再次运行，新运行指令如下：
 
-本说明覆盖当前第一阶段实验：冻结本地预训练的 XCLIP，利用真假视频对探测三类敏感神经元，将最终固定的 768 维特征直接送入 Mamba 和四分类头训练，并与 XCLIP baseline 对比。
+1、【可直接运行】小模型阶段的 DINOv2/DINOv3 神经元探测实验，以及 DINOv2/DINOv3/XCLIP 在 ActivityForensics 上的泛化测试，详见 [补充说明](SupplyREADME.md)。
+
+2、【正在调试】大模型阶段以小模型阶段生成的proposal为基础，依次开展 SFT、OPD 与 GRPO 训练；运行说明请参阅 [运行指令](Trace/README_RUN_OPD_GRPO.md)。
+
+
+
+## 0. 目录结构
 
 所有命令均在服务器的 `MSLoc_code` 目录执行；命令中的所有路径均为相对路径。数据、预训练模型、缓存、中间结果、模型权重、评测与可视化结果均写入同级目录 `../MSLoc_data`。
 
@@ -69,7 +75,7 @@ mkdir -p ../MSLoc_data/DeMamba/full/configs
 
 cat > ../MSLoc_data/DeMamba/full/configs/xclip_baseline_full.yaml <<'YAML'
 model: 'XCLIP_DeMamba_4'
-tuning_mode: 'lp'
+tuning_mode: 'sft'
 task: 'many2many'
 
 save_dir: '../MSLoc_data/DeMamba/full/baseline/results'
@@ -89,8 +95,7 @@ window_length: 2.0
 frames_per_window: 8
 mode: 'four_class'
 transform_config: {
-  crop_youku: True,
-  normalization: 'clip'
+  crop_youku: True
 }
 YAML
 
@@ -117,8 +122,7 @@ window_length: 2.0
 frames_per_window: 8
 mode: 'four_class'
 transform_config: {
-  crop_youku: True,
-  normalization: 'clip'
+  crop_youku: True
 }
 YAML
 ```
@@ -209,44 +213,4 @@ python DeMamba/eval.py \
 python evaluate_long.py \
   --gt_file "../MSLoc_data/test_all_1209_0119_long.json" \
   --infer_file "../MSLoc_data/DeMamba/full/method/eval/predictions.json"
-```
-
-
-
-## 8. 可视化
-
-```bash
-python DeMamba/visualize_xclip_neuron_heatmaps.py \
-  --scores ../MSLoc_data/DeMamba/full/method/neuron_probe/xclip_neuron_scores.npz \
-  --selector ../MSLoc_data/DeMamba/full/method/neuron_probe/xclip_neuron_indices.json \
-  --output-dir ../MSLoc_data/DeMamba/full/method/neuron_probe/visualizations
-```
-
-预测时间线可视化：
-
-```bash
-python DeMamba/visualize_predictions.py \
-  --predictions ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
-  --output-dir ../MSLoc_data/DeMamba/full/method/eval/visualizations \
-  --max-videos 30
-```
-
-## 9. 可选：小样本调试
-
-全量流程不需要调用本节。若只想验证代码和环境，可以使用 `DeMamba/make_paired_subset.py` 生成小样本
-
-```bash
-python DeMamba/make_paired_subset.py \
-  --annotations ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
-  --output ../MSLoc_data/DeMamba/debug/train_20.json \
-  --fake-count 20
-```
-
-```bash
-python DeMamba/extract_subset_frames.py \
-  --annotations ../MSLoc_data/DeMamba/debug/train_20.json \
-  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
-  --output-root ../MSLoc_data/DeMamba/video_frames \
-  --fps 8 \
-  --num-workers 8
 ```
