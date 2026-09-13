@@ -1,6 +1,6 @@
 # DINOv2 ViT-B/14 + DeMamba：下载与运行
 
-所有命令均从项目根目录 `MSLoc_code` 执行
+所有命令均从项目根目录 `MSLoc_code` 执行。默认使用单机 8 卡；单卡正式测试时，仅将 `--device-ids 0,1,2,3,4,5,6,7` 改为 `--device-ids 0`，其他参数保持不变。
 
 ## 1. DINOv2
 
@@ -35,7 +35,7 @@ python DeMamba/eval.py \
   --config DeMamba/configs/DINOv2_Tasle.yaml \
   --model_path ../MSLoc_data/DeMamba/results/dinov2_baseline_4/best_acc.pth \
   --output_dir ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --val-batch-size 16 \
   --cache-data \
   --resume \
@@ -109,7 +109,7 @@ python DeMamba/eval.py \
   --config DeMamba/configs/DINOv2_Tasle_neurons.yaml \
   --model_path ../MSLoc_data/DeMamba/results/dinov2_neurons_4/best_acc.pth \
   --output_dir ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --val-batch-size 16 \
   --cache-data \
   --resume \
@@ -137,7 +137,7 @@ python DeMamba/eval_activityforensics.py \
   --annotation-dir ../MSLoc_data/ActivityForensics \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --batch-size 16 \
   --clean
 ```
@@ -189,7 +189,7 @@ python DeMamba/eval.py \
   --config DeMamba/configs/DINOv3_Tasle.yaml \
   --model_path ../MSLoc_data/DeMamba/results/dinov3_baseline_4/best_acc.pth \
   --output_dir ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --val-batch-size 16 \
   --cache-data \
   --resume \
@@ -264,7 +264,7 @@ python DeMamba/eval.py \
   --config DeMamba/configs/DINOv3_Tasle_neurons.yaml \
   --model_path ../MSLoc_data/DeMamba/results/dinov3_neurons_4/best_acc.pth \
   --output_dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --val-batch-size 16 \
   --cache-data \
   --resume \
@@ -292,7 +292,7 @@ python DeMamba/eval_activityforensics.py \
   --annotation-dir ../MSLoc_data/ActivityForensics \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --batch-size 16 \
   --clean
 ```
@@ -317,7 +317,7 @@ python DeMamba/eval_activityforensics.py \
   --annotation-dir ../MSLoc_data/ActivityForensics \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/full/method/eval_activityforensics \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --batch-size 16 \
   --clean
 ```
@@ -342,7 +342,7 @@ python DeMamba/eval_activityforensics.py \
   --annotation-dir ../MSLoc_data/ActivityForensics \
   --video-root ../MSLoc_data/ActivityForensics \
   --output-dir ../MSLoc_data/DeMamba/results/all_Class_4/eval_activityforensics \
-  --device-ids 0 \
+  --device-ids 0,1,2,3,4,5,6,7 \
   --batch-size 16 \
   --clean
 ```

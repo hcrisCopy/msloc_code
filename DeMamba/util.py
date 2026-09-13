@@ -838,7 +838,8 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
     lossTrainNorm = 0
     scheduler.step()
 
-    pbar = tqdm(total=cfg['bath_per_epoch'])
+    pbar = tqdm(total=cfg['bath_per_epoch'], desc=f"Training epoch {epochID + 1}/{cfg['max_epoch']}",
+                unit="batch", dynamic_ncols=True)
     for batchID, (index, input, target, binary_label) in enumerate(train_loader):
         if batchID > cfg['bath_per_epoch']:
             break

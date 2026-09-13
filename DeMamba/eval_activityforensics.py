@@ -304,10 +304,11 @@ def load_model(cfg: dict, checkpoint_path: Path, device: torch.device, device_id
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing or unexpected:
         raise RuntimeError(f"Checkpoint/config mismatch. Missing={missing[:8]}, unexpected={unexpected[:8]}")
-    model.eval()
     print(f"[ok] Loaded checkpoint: {checkpoint_path}")
     if len(device_ids) > 1:
-        print("[note] This evaluator uses only the first requested GPU")
+        model = torch.nn.DataParallel(model, device_ids=list(device_ids), output_device=device_ids[0])
+        print(f"[ok] Using DataParallel on CUDA devices: {list(device_ids)}")
+    model.eval()
     return model
 
 
