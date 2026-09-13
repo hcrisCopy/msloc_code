@@ -11,13 +11,124 @@ hf download facebook/dinov2-base \
   --local-dir ../MSLoc_data/DeMamba/pretrained_weights/dinov2_hf
 ```
 
-### 1.2 正式神经元探测、训练与原论文测试集评测
+### 1.2 不使用神经元探测的基线训练与评测
+
+该基线直接把 DINOv2 最后一层的全部 patch-token 隐藏特征输入 DeMamba，不读取神经元索引。
+
+训练结果输出到 `../MSLoc_data/DeMamba/results/dinov2_baseline_4/`；中断后从最新 epoch 继续。
 
 ```bash
-bash DeMamba/run_dinov2_neuron_pipeline.sh
+python DeMamba/train.py \
+  --config DeMamba/configs/DINOv2_Tasle.yaml \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --train-batch-size 32 \
+  --val-batch-size 32 \
+  --max-epoch 10 \
+  --seed 42 \
+  --resume-from-checkpoint auto
 ```
 
-### 1.3 评测新 benchmark：ActivityForensics
+读取训练得到的 `best_acc.pth` 评测原论文测试集，结果输出到 `../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval/`；中断后继续，完成后直接复用。
+
+```bash
+python DeMamba/eval.py \
+  --config DeMamba/configs/DINOv2_Tasle.yaml \
+  --model_path ../MSLoc_data/DeMamba/results/dinov2_baseline_4/best_acc.pth \
+  --output_dir ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval \
+  --device-ids 0 \
+  --val-batch-size 16 \
+  --cache-data \
+  --resume \
+  --reuse-existing
+```
+
+读取上一步的预测并汇总指标，输出到 `../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval/metrics_long.json`；文件已存在时直接复用。
+
+```bash
+python evaluate_long.py \
+  --gt_file ../MSLoc_data/test_all_1209_0119_long.json \
+  --infer_file ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval/predictions.json \
+  --output_file ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval/metrics_long.json \
+  --reuse-existing
+```
+
+### 1.3 使用神经元探测的训练与原论文测试集评测
+
+#### 第一步：构造真假帧对
+
+从训练标注和已抽取视频帧生成神经元探测所需的真假帧对，输出到 `../MSLoc_data/DeMamba/neuron_probe_dinov2/train_pairs.jsonl`；文件已存在时直接复用。
+
+```bash
+python DeMamba/build_probe_pairs.py \
+  --annotations /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/annos/train_all_1209.json \
+  --frame-root /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/video_frames \
+  --output ../MSLoc_data/DeMamba/neuron_probe_dinov2/train_pairs.jsonl \
+  --fps 8 \
+  --strict \
+  --reuse-existing
+```
+
+#### 第二步：探测 DINOv2 神经元
+
+读取上一步的真假帧对并计算敏感神经元，输出得分和索引到 `../MSLoc_data/DeMamba/neuron_probe_dinov2/`；中断后继续，完成后直接复用。
+
+```bash
+python DeMamba/probe_dinov2_neurons.py \
+  --pairs ../MSLoc_data/DeMamba/neuron_probe_dinov2/train_pairs.jsonl \
+  --frame-root /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/video_frames \
+  --dinov2-hf-model-path ../MSLoc_data/DeMamba/pretrained_weights/dinov2_hf \
+  --output-dir ../MSLoc_data/DeMamba/neuron_probe_dinov2 \
+  --image-batch-size 32 \
+  --crop-youku \
+  --amp \
+  --strict \
+  --resume
+```
+
+#### 第三步：训练 DINOv2 + DeMamba
+
+读取上一步的神经元索引进行训练，checkpoint 输出到 `../MSLoc_data/DeMamba/results/dinov2_neurons_4/`；中断后从最新 epoch 继续。
+
+```bash
+python DeMamba/train.py \
+  --config DeMamba/configs/DINOv2_Tasle_neurons.yaml \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --train-batch-size 32 \
+  --val-batch-size 32 \
+  --max-epoch 10 \
+  --seed 42 \
+  --resume-from-checkpoint auto
+```
+
+#### 第四步：评测原论文测试集
+
+读取训练得到的 `best_acc.pth` 生成预测，结果输出到 `../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval/`；中断后继续，完成后直接复用。
+
+```bash
+python DeMamba/eval.py \
+  --config DeMamba/configs/DINOv2_Tasle_neurons.yaml \
+  --model_path ../MSLoc_data/DeMamba/results/dinov2_neurons_4/best_acc.pth \
+  --output_dir ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval \
+  --device-ids 0 \
+  --val-batch-size 16 \
+  --cache-data \
+  --resume \
+  --reuse-existing
+```
+
+#### 第五步：汇总原论文指标
+
+读取上一步的 `predictions.json` 计算最终指标，输出到 `../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval/metrics_long.json`；文件已存在时直接复用。
+
+```bash
+python evaluate_long.py \
+  --gt_file ../MSLoc_data/test_all_1209_0119_long.json \
+  --infer_file ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval/predictions.json \
+  --output_file ../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval/metrics_long.json \
+  --reuse-existing
+```
+
+### 1.4 评测新 benchmark：ActivityForensics
 
 ```bash
 python DeMamba/eval_activityforensics.py \
@@ -54,13 +165,125 @@ python evaluate_proposal_quality.py \
 hf download facebook/dinov3-vitb16-pretrain-lvd1689m --local-dir "../MSLoc_data/DeMamba/pretrained_weights/dinov3_hf"
 ```
 
-### 2.2 神经元探测、SFT 训练与原论文测试集评测
+### 2.2 不使用神经元探测的基线训练与评测
+
+该基线直接把 DINOv3 最后一层去除 CLS 和 register token 后的全部 patch-token 隐藏特征输入 DeMamba，不读取神经元索引。
+
+训练结果输出到 `../MSLoc_data/DeMamba/results/dinov3_baseline_4/`；中断后从最新 epoch 继续。
 
 ```bash
-bash DeMamba/run_dinov3_neuron_pipeline.sh
+python DeMamba/train.py \
+  --config DeMamba/configs/DINOv3_Tasle.yaml \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --train-batch-size 32 \
+  --val-batch-size 32 \
+  --max-epoch 10 \
+  --seed 42 \
+  --resume-from-checkpoint auto
 ```
 
-### 2.3 评测新 benchmark：ActivityForensics
+读取训练得到的 `best_acc.pth` 评测原论文测试集，结果输出到 `../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval/`；中断后继续，完成后直接复用。
+
+```bash
+python DeMamba/eval.py \
+  --config DeMamba/configs/DINOv3_Tasle.yaml \
+  --model_path ../MSLoc_data/DeMamba/results/dinov3_baseline_4/best_acc.pth \
+  --output_dir ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval \
+  --device-ids 0 \
+  --val-batch-size 16 \
+  --cache-data \
+  --resume \
+  --reuse-existing
+```
+
+读取上一步的预测并汇总指标，输出到 `../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval/metrics_long.json`；文件已存在时直接复用。
+
+```bash
+python evaluate_long.py \
+  --gt_file ../MSLoc_data/test_all_1209_0119_long.json \
+  --infer_file ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval/predictions.json \
+  --output_file ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval/metrics_long.json \
+  --reuse-existing
+```
+
+### 2.3 使用神经元探测的训练与原论文测试集评测
+
+#### 第一步：构造真假帧对
+
+从训练标注和已抽取视频帧生成神经元探测所需的真假帧对，输出到 `../MSLoc_data/DeMamba/neuron_probe_dinov3/train_pairs.jsonl`；文件已存在时直接复用。
+
+```bash
+python DeMamba/build_probe_pairs.py \
+  --annotations /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/annos/train_all_1209.json \
+  --frame-root /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/video_frames \
+  --output ../MSLoc_data/DeMamba/neuron_probe_dinov3/train_pairs.jsonl \
+  --fps 8 \
+  --strict \
+  --reuse-existing
+```
+
+#### 第二步：探测 DINOv3 神经元
+
+读取上一步的真假帧对并计算敏感神经元，输出得分和索引到 `../MSLoc_data/DeMamba/neuron_probe_dinov3/`；中断后继续，完成后直接复用。
+
+```bash
+python DeMamba/probe_dinov3_neurons.py \
+  --pairs ../MSLoc_data/DeMamba/neuron_probe_dinov3/train_pairs.jsonl \
+  --frame-root /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/0826/dataset/Tasle-CoT-10K/video_frames \
+  --dinov3-backend huggingface \
+  --dinov3-hf-model-path ../MSLoc_data/DeMamba/pretrained_weights/dinov3_hf \
+  --output-dir ../MSLoc_data/DeMamba/neuron_probe_dinov3 \
+  --image-batch-size 32 \
+  --crop-youku \
+  --amp \
+  --strict \
+  --resume
+```
+
+#### 第三步：训练 DINOv3 + DeMamba
+
+读取上一步的神经元索引进行训练，checkpoint 输出到 `../MSLoc_data/DeMamba/results/dinov3_neurons_4/`；中断后从最新 epoch 继续。
+
+```bash
+python DeMamba/train.py \
+  --config DeMamba/configs/DINOv3_Tasle_neurons.yaml \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --train-batch-size 32 \
+  --val-batch-size 32 \
+  --max-epoch 10 \
+  --seed 42 \
+  --resume-from-checkpoint auto
+```
+
+#### 第四步：评测原论文测试集
+
+读取训练得到的 `best_acc.pth` 生成预测，结果输出到 `../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval/`；中断后继续，完成后直接复用。
+
+```bash
+python DeMamba/eval.py \
+  --config DeMamba/configs/DINOv3_Tasle_neurons.yaml \
+  --model_path ../MSLoc_data/DeMamba/results/dinov3_neurons_4/best_acc.pth \
+  --output_dir ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval \
+  --device-ids 0 \
+  --val-batch-size 16 \
+  --cache-data \
+  --resume \
+  --reuse-existing
+```
+
+#### 第五步：汇总原论文指标
+
+读取上一步的 `predictions.json` 计算最终指标，输出到 `../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval/metrics_long.json`；文件已存在时直接复用。
+
+```bash
+python evaluate_long.py \
+  --gt_file ../MSLoc_data/test_all_1209_0119_long.json \
+  --infer_file ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval/predictions.json \
+  --output_file ../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval/metrics_long.json \
+  --reuse-existing
+```
+
+### 2.4 评测新 benchmark：ActivityForensics
 
 ```bash
 python DeMamba/eval_activityforensics.py \

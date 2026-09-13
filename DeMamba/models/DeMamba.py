@@ -598,6 +598,126 @@ class XCLIP_NeuronDeMamba(nn.Module):
 
 
 
+class _DINOFullFeatureDeMamba(nn.Module):
+    """Feed all final-layer DINO patch tokens directly to the DeMamba head."""
+
+    def __init__(self, input_size, class_num=4):
+        super().__init__()
+        self.hidden_size = 768
+        self.patch_nums = 196
+        self.input_size = int(input_size)
+        self.mamba_configs = MambaConfig(d_model=self.hidden_size)
+        self.mamba = ResidualBlock(config=self.mamba_configs)
+        self.fc_norm = nn.LayerNorm(self.patch_nums * self.hidden_size)
+        self.fc_norm2 = nn.LayerNorm(self.hidden_size)
+        self.fc1 = nn.Linear((self.patch_nums + 1) * self.hidden_size, class_num)
+        self.dropout = nn.Dropout(p=0.0)
+        self.initialize_weights(self.fc1)
+
+    @staticmethod
+    def initialize_weights(module):
+        for item in module.modules():
+            if isinstance(item, nn.Linear):
+                init.xavier_uniform_(item.weight)
+                if item.bias is not None:
+                    init.constant_(item.bias, 0)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if not any(parameter.requires_grad for parameter in self.encoder.parameters()):
+            self.encoder.eval()
+        return self
+
+    def _last_patch_features(self, images):
+        raise NotImplementedError
+
+    def forward(self, x):
+        batch_size, num_frames, _, height, width = x.shape
+        if (height, width) != (self.input_size, self.input_size):
+            raise ValueError(
+                f"{type(self).__name__} requires {self.input_size}x{self.input_size} input, "
+                f"got {height}x{width}"
+            )
+        images = x.reshape(batch_size * num_frames, 3, height, width)
+        features = self._last_patch_features(images)
+        if features.shape[1:] != (self.patch_nums, self.hidden_size):
+            raise RuntimeError(
+                f"Expected final-layer patch features (*,{self.patch_nums},{self.hidden_size}), "
+                f"got {tuple(features.shape)}"
+            )
+        features = features.reshape(batch_size, num_frames, self.patch_nums, self.hidden_size)
+        features = features.to(dtype=self.fc1.weight.dtype)
+
+        global_feat = self.fc_norm2(features.mean(dim=(1, 2)))
+        mamba_input = features.reshape(batch_size, num_frames, 1, 14, 1, 14, self.hidden_size)
+        mamba_input = mamba_input.permute(0, 2, 4, 1, 3, 5, 6).contiguous()
+        mamba_input = mamba_input.reshape(batch_size * self.patch_nums, num_frames, self.hidden_size)
+        local_feat = self.mamba(mamba_input).mean(dim=1).reshape(batch_size, -1)
+        local_feat = self.fc_norm(local_feat)
+        return self.dropout(self.fc1(torch.cat((global_feat, local_feat), dim=1)))
+
+
+class DINOv2_DeMamba(_DINOFullFeatureDeMamba):
+    """DINOv2 ViT-B/14 baseline using every final-layer patch-token channel."""
+
+    def __init__(self, dinov2_hf_model_path, class_num=4):
+        super().__init__(input_size=196, class_num=class_num)
+        hf_model_path = os.path.abspath(dinov2_hf_model_path or "")
+        if not os.path.isdir(hf_model_path):
+            raise FileNotFoundError(f"Local Hugging Face DINOv2 directory not found: {hf_model_path}")
+        self.encoder = AutoModel.from_pretrained(hf_model_path, local_files_only=True)
+        config = self.encoder.config
+        shape = (int(getattr(config, "hidden_size", 0)), int(getattr(config, "patch_size", 0)),
+                 int(getattr(config, "num_hidden_layers", 0)), int(getattr(config, "num_register_tokens", 0)))
+        if shape != (768, 14, 12, 0):
+            raise ValueError(f"Expected standard DINOv2 ViT-B/14 (768,14,12,0), got {shape}")
+
+    def _last_patch_features(self, images):
+        outputs = self.encoder(pixel_values=images, return_dict=True)
+        return outputs.last_hidden_state[:, 1:, :]
+
+
+class DINOv3_DeMamba(_DINOFullFeatureDeMamba):
+    """DINOv3 ViT-B/16 baseline using every final-layer patch-token channel."""
+
+    def __init__(self, dinov3_repo_path=None, dinov3_weights_path=None,
+                 dinov3_model_name="dinov3_vitb16", dinov3_backend="huggingface",
+                 dinov3_hf_model_path=None, class_num=4):
+        super().__init__(input_size=224, class_num=class_num)
+        if dinov3_model_name != "dinov3_vitb16":
+            raise ValueError("DINOv3_DeMamba requires dinov3_vitb16")
+        self.dinov3_backend = str(dinov3_backend).lower()
+        if self.dinov3_backend == "huggingface":
+            hf_model_path = os.path.abspath(dinov3_hf_model_path or "")
+            if not os.path.isdir(hf_model_path):
+                raise FileNotFoundError(f"Local Hugging Face DINOv3 directory not found: {hf_model_path}")
+            self.encoder = AutoModel.from_pretrained(hf_model_path, local_files_only=True)
+            config = self.encoder.config
+            shape = (int(getattr(config, "hidden_size", 0)), int(getattr(config, "patch_size", 0)),
+                     int(getattr(config, "num_hidden_layers", 0)), int(getattr(config, "num_register_tokens", 0)))
+        elif self.dinov3_backend == "official":
+            repo_path = os.path.abspath(dinov3_repo_path or "")
+            weights_path = os.path.abspath(dinov3_weights_path or "")
+            if not os.path.isdir(repo_path) or not os.path.isfile(weights_path):
+                raise FileNotFoundError("DINOv3 official repository/weights not found")
+            self.encoder = torch.hub.load(
+                repo_or_dir=repo_path, model=dinov3_model_name, source="local", weights=weights_path
+            )
+            shape = (int(getattr(self.encoder, "embed_dim", 0)), int(getattr(self.encoder, "patch_size", 0)),
+                     int(getattr(self.encoder, "n_blocks", 0)), int(getattr(self.encoder, "n_storage_tokens", 4)))
+        else:
+            raise ValueError("dinov3_backend must be either 'huggingface' or 'official'")
+        if shape != (768, 16, 12, 4):
+            raise ValueError(f"Expected DINOv3 ViT-B/16 (768,16,12,4), got {shape}")
+        self.num_register_tokens = 4
+
+    def _last_patch_features(self, images):
+        if self.dinov3_backend == "huggingface":
+            outputs = self.encoder(pixel_values=images, return_dict=True)
+            return outputs.last_hidden_state[:, 1 + self.num_register_tokens:, :]
+        return self.encoder.get_intermediate_layers(images, n=1, norm=True)[0]
+
+
 class DINOv3_NeuronDeMamba(nn.Module):
     """Frozen local DINOv3 ViT-B/16 with the unchanged selected-neuron DeMamba head.
 

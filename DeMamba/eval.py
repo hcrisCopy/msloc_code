@@ -285,12 +285,19 @@ def main():
     parser.add_argument('--clean', action='store_true', help='Remove this output directory\'s known evaluation products and caches first')
     parser.add_argument('--save-progress', action='store_true', help='Save batch-level evaluation progress for later --resume')
     parser.add_argument('--cache-data', action='store_true', help='Cache constructed video windows for reuse')
+    parser.add_argument('--reuse-existing', action='store_true',
+                        help='Reuse a completed evaluation in output_dir instead of running inference again')
     parser.add_argument('--dataset-base-path', default=None, help='Optional override for cfg.dataset_base_path')
     parser.add_argument('--neuron-indices-path', default=None,
                         help='Optional override for cfg.neuron_indices_path')
     
     args = parser.parse_args()
     args.device_ids = parse_device_ids(args.device_ids)
+    output_root = Path(args.output_dir).resolve()
+    completed_outputs = ('predictions.json', 'evaluation_results.json', 'summary_results.json')
+    if args.reuse_existing and all((output_root / name).is_file() for name in completed_outputs):
+        print(f"[reuse] Completed evaluation: {output_root}")
+        return
     if args.device != 'cuda':
         raise ValueError('The current evaluation loop uses CUDA tensors; pass --device cuda.')
     if not torch.cuda.is_available():
@@ -333,7 +340,6 @@ def main():
         cfg['neuron_indices_path'] = args.neuron_indices_path
     cfg['evaluation_only'] = bool(args.anno_file or args.max_eval_videos is not None or args.resume or args.save_progress)
 
-    output_root = Path(args.output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     if args.clean and args.resume:
         raise ValueError('--clean and --resume cannot be used together')

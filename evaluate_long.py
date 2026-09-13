@@ -1,5 +1,6 @@
 import json
 import numpy as np
+from pathlib import Path
 from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 
 def calculate_iou(seg1, seg2):
@@ -267,6 +268,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gt_file", type=str, required=True, help="Path to GT JSON file")
     parser.add_argument("--infer_file", type=str, required=True, help="Path to Inference JSON file")
+    parser.add_argument("--output_file", type=Path, help="Optional JSON file for the final metrics")
+    parser.add_argument("--reuse-existing", action="store_true",
+                        help="Reuse output_file when it already exists")
     args = parser.parse_args()
 
-    evaluate(args.gt_file, args.infer_file)
+    if args.reuse_existing and args.output_file and args.output_file.is_file():
+        print(f"[reuse] Existing metrics: {args.output_file}")
+    else:
+        results = evaluate(args.gt_file, args.infer_file)
+        if args.output_file:
+            args.output_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = args.output_file.with_name(args.output_file.name + ".tmp")
+            temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(args.output_file)
+            print(f"Saved metrics to: {args.output_file}")

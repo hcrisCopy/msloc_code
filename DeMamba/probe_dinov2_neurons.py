@@ -44,6 +44,45 @@ class RunningVectorStats:
         return self.mean / np.sqrt(std * std + floor * floor)
 
 
+def progress_signature(args):
+    pairs_stat = args.pairs.stat()
+    return json.dumps({
+        "pairs": str(args.pairs.resolve()), "pairs_size": pairs_stat.st_size,
+        "pairs_mtime_ns": pairs_stat.st_mtime_ns, "frame_root": str(args.frame_root.resolve()),
+        "model": str(args.dinov2_hf_model_path.resolve()), "max_frame_pairs": args.max_frame_pairs,
+        "crop_youku": args.crop_youku,
+    }, sort_keys=True)
+
+
+def save_progress(path, signature, next_group, stats, failures, processed_frames, processed_videos):
+    arrays = {
+        "signature": np.asarray(signature), "next_group": np.asarray(next_group),
+        "failures": np.asarray(failures), "processed_frames": np.asarray(processed_frames),
+        "processed_videos": np.asarray(processed_videos),
+    }
+    for layer, state in stats.items():
+        arrays[f"count_{layer}"] = np.asarray(state.count)
+        arrays[f"mean_{layer}"] = state.mean
+        arrays[f"m2_{layer}"] = state.m2
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    temporary.replace(path)
+
+
+def load_progress(path, signature):
+    with np.load(path, allow_pickle=False) as saved:
+        if str(saved["signature"].item()) != signature:
+            raise ValueError(f"Probe progress does not match current inputs: {path}")
+        stats = {layer: RunningVectorStats(768) for layer in range(1, 13)}
+        for layer, state in stats.items():
+            state.count = int(saved[f"count_{layer}"].item())
+            state.mean = saved[f"mean_{layer}"].copy()
+            state.m2 = saved[f"m2_{layer}"].copy()
+        return (int(saved["next_group"].item()), stats, saved["failures"].astype(str).tolist(),
+                int(saved["processed_frames"].item()), int(saved["processed_videos"].item()))
+
+
 def read_pairs(path):
     pairs = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     required = {"fake_video", "normal_video", "frame_number", "normal_frame_number", "fake_frame_file", "normal_frame_file"}
@@ -106,10 +145,12 @@ def get_block_patch_states(model, batch):
     return states
 
 
-def process_groups(model, groups, args, device):
-    stats = {layer: RunningVectorStats(768) for layer in range(1, 13)}
-    failures, processed_frames, processed_videos = [], 0, 0
-    for group in tqdm(groups, desc="Probing paired DINOv2 neurons", unit="video", dynamic_ncols=True):
+def process_groups(model, groups, args, device, stats, failures, processed_frames, processed_videos,
+                   start_group, progress_path, signature):
+    remaining = groups[start_group:]
+    for group_index, group in enumerate(
+            tqdm(remaining, desc="Probing paired DINOv2 neurons", unit="video", dynamic_ncols=True),
+            start=start_group):
         loaded = []
         for pair in group:
             try:
@@ -143,6 +184,9 @@ def process_groups(model, groups, args, device):
             stats[layer].update(sums[layer] / valid)
         processed_frames += valid
         processed_videos += 1
+        if args.resume:
+            save_progress(progress_path, signature, group_index + 1, stats, failures,
+                          processed_frames, processed_videos)
     return stats, failures, processed_frames, processed_videos
 
 
@@ -159,21 +203,38 @@ def main():
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--crop-youku", action="store_true")
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume an interrupted probe or reuse completed neuron outputs")
     args = parser.parse_args()
     if args.final_neuron_count != 768:
         parser.error("The unchanged DeMamba head requires --final-neuron-count 768")
     if args.image_batch_size < 1 or args.max_frame_pairs < 0:
         parser.error("image-batch-size must be positive and max-frame-pairs non-negative")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    score_path = args.output_dir / "dinov2_neuron_scores.npz"
+    selector_path = args.output_dir / "dinov2_neuron_indices.json"
+    progress_path = args.output_dir / "dinov2_probe_progress.npz"
+    if args.resume and score_path.is_file() and selector_path.is_file():
+        print(f"[reuse] Completed DINOv2 neuron probe: {selector_path}")
+        return
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     pairs = read_pairs(args.pairs)
     if args.max_frame_pairs:
         pairs = pairs[:args.max_frame_pairs]
-    stats, failures, frames, videos = process_groups(load_encoder(args.dinov2_hf_model_path, device), group_pairs(pairs), args, device)
+    groups = group_pairs(pairs)
+    signature = progress_signature(args)
+    stats = {layer: RunningVectorStats(768) for layer in range(1, 13)}
+    failures, frames, videos, start_group = [], 0, 0, 0
+    if args.resume and progress_path.is_file():
+        start_group, stats, failures, frames, videos = load_progress(progress_path, signature)
+        print(f"[resume] Continuing DINOv2 neuron probe at source video {start_group}/{len(groups)}")
+    stats, failures, frames, videos = process_groups(
+        load_encoder(args.dinov2_hf_model_path, device), groups, args, device, stats, failures,
+        frames, videos, start_group, progress_path, signature)
     if videos < 2:
         raise RuntimeError("At least two source videos with valid paired frames are required")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     arrays, layers = {}, {}
     for layer, state in stats.items():
         signed = state.signed_effect()
@@ -183,7 +244,7 @@ def main():
         arrays[f"frame_layer_{layer:02d}_mean_delta"] = state.mean.astype(np.float32)
         arrays[f"frame_layer_{layer:02d}_video_count"] = np.asarray(state.count, dtype=np.int32)
         layers[str(layer)] = sorted(np.argsort(score)[::-1][:64].astype(np.int32).tolist())
-    np.savez_compressed(args.output_dir / "dinov2_neuron_scores.npz", **arrays)
+    np.savez_compressed(score_path, **arrays)
     selector = {
         "schema_version": 1, "backbone": "dinov2_vitb14", "selection_task": "frame_level_fake_vs_real",
         "selection_unit": "per_video_mean_of_paired_fake_minus_real_frames",
@@ -192,9 +253,11 @@ def main():
         "channels_per_layer": 64, "layers": layers,
         "processed_frame_pairs": frames, "processed_source_videos": videos, "failures": failures,
     }
-    (args.output_dir / "dinov2_neuron_indices.json").write_text(json.dumps(selector, indent=2), encoding="utf-8")
+    selector_path.write_text(json.dumps(selector, indent=2), encoding="utf-8")
+    if progress_path.is_file():
+        progress_path.unlink()
     print(f"Processed paired frames: {frames}; source videos: {videos}; failures: {len(failures)}")
-    print(f"Selector: {args.output_dir / 'dinov2_neuron_indices.json'}")
+    print(f"Selector: {selector_path}")
 
 
 if __name__ == "__main__":

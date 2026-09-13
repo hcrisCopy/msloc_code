@@ -116,10 +116,16 @@ def main():
                         help="Optional deterministic cap on fake source videos; 0 keeps every usable video")
     parser.add_argument("--strict", action="store_true",
                         help="Fail if an aligned real frame is missing instead of skipping it")
+    parser.add_argument("--reuse-existing", action="store_true",
+                        help="Reuse a non-empty existing output manifest instead of rebuilding it")
     args = parser.parse_args()
     if (args.fps <= 0 or args.boundary_margin < 0 or args.frame_stride <= 0 or
             args.max_frames_per_video < 0 or args.max_fake_videos < 0):
         parser.error("fps/stride must be positive; margins and maximums must be non-negative")
+
+    if args.reuse_existing and args.output.is_file() and args.output.stat().st_size > 0:
+        print(f"[reuse] Existing frame-pair manifest: {args.output}")
+        return
 
     frame_root = args.frame_root.resolve()
     mapping = load_pair_map(args.pair_map) if args.pair_map else {}
@@ -194,7 +200,9 @@ def main():
     if not pairs:
         raise RuntimeError("No valid annotated fake-frame/real-frame pairs were found")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text("".join(json.dumps(pair, ensure_ascii=False) + "\n" for pair in pairs), encoding="utf-8")
+    temporary = args.output.with_name(args.output.name + ".tmp")
+    temporary.write_text("".join(json.dumps(pair, ensure_ascii=False) + "\n" for pair in pairs), encoding="utf-8")
+    temporary.replace(args.output)
     print(f"Wrote {len(pairs)} frame pairs from {len(selected_fake_videos)} fake videos to {args.output}")
     if skipped:
         path = args.output.with_suffix(".skipped.txt")

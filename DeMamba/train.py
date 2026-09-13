@@ -4,6 +4,8 @@ import yaml
 import torch
 import numpy as np
 import os
+import re
+from pathlib import Path
 import util
 from util import build_model, train_one_epoch
 from dataloader import generate_dataset_loader_from_json
@@ -35,6 +37,8 @@ def get_arguments():
                         help='Optional override for cfg.max_epoch')
     parser.add_argument('--seed', type=int, default=3407,
                         help='Random seed; use the same seed for baseline and neuron method')
+    parser.add_argument('--resume-from-checkpoint', default=None,
+                        help="Checkpoint path, or 'auto' to reuse the latest numbered checkpoint")
     args = parser.parse_args()
     args.device_ids = parse_device_ids(args.device_ids)
     return args
@@ -104,8 +108,31 @@ if __name__ == '__main__':
         os.makedirs(snapshot_path)
 
     max_epoch, max_acc = 0, 0
+    start_epoch = 0
+    if args.resume_from_checkpoint:
+        checkpoint_path = args.resume_from_checkpoint
+        if checkpoint_path == 'auto':
+            candidates = [path for path in Path(snapshot_path).glob('*.pth')
+                          if re.fullmatch(r'\d+\.pth', path.name)]
+            checkpoint_path = str(max(candidates, key=lambda path: int(path.stem))) if candidates else None
+        if checkpoint_path:
+            checkpoint = torch.load(checkpoint_path, map_location=f'cuda:{primary_device}', weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            if checkpoint.get('optimizer_state_dict'):
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if checkpoint.get('scheduler_state_dict'):
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = int(checkpoint.get('epoch', 0))
+            max_epoch = int(checkpoint.get('best_epoch', max(0, start_epoch - 1)))
+            max_acc = float(checkpoint.get('best_acc', 0.0))
+            print(f"******* Resuming from {checkpoint_path} at epoch {start_epoch} *******")
+        else:
+            print("******* No checkpoint found; starting a new training run. *******")
 
-    for epochID in range(0, trMaxEpoch):
+    if start_epoch >= trMaxEpoch:
+        print(f"******* Reusing completed training: {start_epoch}/{trMaxEpoch} epochs *******")
+
+    for epochID in range(start_epoch, trMaxEpoch):
         print("******* Training epoch", str(epochID)," *******")
         print("******* Building datasets. *******")
         train_loader, val_loader, test_fake_segments = generate_dataset_loader_from_json(cfg)

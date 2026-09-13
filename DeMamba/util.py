@@ -13,12 +13,22 @@ import warnings
 import os
 
 
-DINO_NEURON_MODELS = {"DINOv2_NeuronDeMamba_4", "DINOv3_NeuronDeMamba_4"}
+DINO_MODELS = {
+    "DINOv2_DeMamba_4", "DINOv2_NeuronDeMamba_4",
+    "DINOv3_DeMamba_4", "DINOv3_NeuronDeMamba_4",
+}
+
+
+def save_checkpoint_atomic(state, path):
+    """Write a checkpoint atomically so an interruption cannot corrupt the last completed epoch."""
+    temporary = path + '.tmp'
+    torch.save(state, temporary)
+    os.replace(temporary, path)
 
 
 def uses_marginal_fake_score(model_name):
     """Whether fake confidence is the sum of the three foreground classes."""
-    return model_name in DINO_NEURON_MODELS
+    return model_name in DINO_MODELS
 
 class TemporalSegmentationEvaluator:
     """Temporal-segmentation evaluator."""
@@ -604,6 +614,27 @@ def build_model(model_name, neuron_indices_path=None, xclip_model_path=None,
             xclip_model_path=xclip_model_path,
             class_num=4,
         )
+    if model_name == 'DINOv2_DeMamba_4':
+        if not dinov2_hf_model_path:
+            raise ValueError("DINOv2_DeMamba_4 requires cfg['dinov2_hf_model_path']")
+        return models.DINOv2_DeMamba(
+            dinov2_hf_model_path=dinov2_hf_model_path,
+            class_num=4,
+        )
+    if model_name == 'DINOv3_DeMamba_4':
+        backend = (dinov3_backend or 'huggingface').lower()
+        if backend == 'huggingface' and not dinov3_hf_model_path:
+            raise ValueError("Hugging Face DINOv3 requires cfg['dinov3_hf_model_path']")
+        if backend == 'official' and (not dinov3_repo_path or not dinov3_weights_path):
+            raise ValueError("Official DINOv3 requires cfg['dinov3_repo_path'] and cfg['dinov3_weights_path']")
+        return models.DINOv3_DeMamba(
+            dinov3_repo_path=dinov3_repo_path,
+            dinov3_weights_path=dinov3_weights_path,
+            dinov3_model_name=dinov3_model_name or 'dinov3_vitb16',
+            dinov3_backend=backend,
+            dinov3_hf_model_path=dinov3_hf_model_path,
+            class_num=4,
+        )
     if model_name == 'DINOv3_NeuronDeMamba_4':
         if not neuron_indices_path:
             raise ValueError("DINOv3_NeuronDeMamba_4 requires cfg['neuron_indices_path']")
@@ -842,20 +873,24 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
     if (epochID+1) % 1 == 0:
         pred_accuracy, video_id, pred_labels, true_labels, outpred, all_videos_results = eval_model(cfg, model, val_loader, loss_ce, cfg['val_batch_size'], test_fake_segments)    
 
-        torch.save(
-            {"epoch": epochID + 1, "model_state_dict": model.state_dict()},
-            snapshot_path + f"/{str(epochID + 1)}"+ ".pth",
-            )
-
         seg_f1 = all_videos_results['overall_metrics']['frame_level']['f1']
         det_acc = all_videos_results['overall_metrics']['video_level']['accuracy']
         loc_f1 = all_videos_results['overall_metrics']['localization_fake_videos']['avg_loc_f1']
 
         if loc_f1 > max_acc:
             max_epoch, max_acc = epochID, loc_f1
-            torch.save(
-            {"epoch": epochID + 1, "model_state_dict": model.state_dict()},
+            save_checkpoint_atomic(
+            {"epoch": epochID + 1, "model_state_dict": model.state_dict(),
+             "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),
+             "best_epoch": max_epoch, "best_acc": max_acc},
             snapshot_path + "/best_acc"+ ".pth",
+            )
+
+        save_checkpoint_atomic(
+            {"epoch": epochID + 1, "model_state_dict": model.state_dict(),
+             "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),
+             "best_epoch": max_epoch, "best_acc": max_acc},
+            snapshot_path + f"/{str(epochID + 1)}" + ".pth",
             )
 
         df_result = pd.DataFrame({
