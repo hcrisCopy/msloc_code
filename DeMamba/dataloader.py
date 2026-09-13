@@ -262,13 +262,13 @@ def determine_four_class_label(window_start: float, window_end: float,
     elif window_fake_ratio > 0.5:
         # Mostly fake -> figure out the transition type.
         if window_start < fake_segments[0][0]:  # assume a single transition point
-            return 3  # fake-to-real
+            return 2  # real-to-fake
         else:
             return 1  # mostly fake -> treat as plain fake
     else:
         # Mostly real -> figure out the transition type.
         if window_end > fake_segments[0][1]:  # assume a single transition point
-            return 2  # real-to-fake
+            return 3  # fake-to-real
         else:
             return 0  # mostly real -> treat as plain real
 
