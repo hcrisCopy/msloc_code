@@ -52,7 +52,34 @@ python evaluate_long.py \
   --reuse-existing
 ```
 
-### 1.3 使用神经元探测的训练与原论文测试集评测
+#### ActivityForensics 泛化评测
+
+读取该基线的 `best_acc.pth` 在新 benchmark 上生成预测，结果输出到 `../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval_activityforensics/`。
+
+```bash
+python DeMamba/eval_activityforensics.py \
+  --config DeMamba/configs/DINOv2_Tasle.yaml \
+  --model-path ../MSLoc_data/DeMamba/results/dinov2_baseline_4/best_acc.pth \
+  --annotation-dir ../MSLoc_data/ActivityForensics \
+  --video-root ../MSLoc_data/ActivityForensics \
+  --output-dir ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval_activityforensics \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --batch-size 16 \
+  --clean
+```
+
+读取上一步的预测评估 proposal 质量，结果输出到 `../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval_activityforensics/proposal_quality/`。
+
+```bash
+python evaluate_proposal_quality.py \
+  --gt-file ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval_activityforensics/predictions.json \
+  --infer-file ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval_activityforensics/predictions.json \
+  --output-dir ../MSLoc_data/DeMamba/results/dinov2_baseline_4/eval_activityforensics/proposal_quality \
+  --iou-thresholds 0.1,0.3,0.5,0.7 \
+  --domain-key tool_domain
+```
+
+### 1.3 使用神经元探测的训练与评测
 
 #### 第一步：构造真假帧对
 
@@ -128,7 +155,9 @@ python evaluate_long.py \
   --reuse-existing
 ```
 
-### 1.4 评测新 benchmark：ActivityForensics
+#### 第六步：评测 ActivityForensics
+
+读取神经元版的 `best_acc.pth` 在新 benchmark 上生成预测，结果输出到 `../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics/`。
 
 ```bash
 python DeMamba/eval_activityforensics.py \
@@ -142,11 +171,11 @@ python DeMamba/eval_activityforensics.py \
   --clean
 ```
 
-DINOv2 使用配置中的 `image_size: 196` 和 `normalization: dinov2`；评测器会自动
-按该配置处理原始视频。数据尚未下载完整时会只评测当前可用视频，并在输出中标记
-`evaluation_scope: partial`；全量下载完成后同一命令会自动评测完整测试集。
+DINOv2 评测器会按配置中的 `image_size: 196` 和 `normalization: dinov2` 处理原始视频；数据未下载完整时只评测当前可用视频，并标记 `evaluation_scope: partial`。
 
-完成上述评测后，运行proposal质量评测：
+#### 第七步：评估 proposal 质量
+
+读取上一步的预测评估 proposal 质量，结果输出到 `../MSLoc_data/DeMamba/results/dinov2_neurons_4/eval_activityforensics/proposal_quality/`。
 
 ```bash
 python evaluate_proposal_quality.py \
@@ -206,7 +235,34 @@ python evaluate_long.py \
   --reuse-existing
 ```
 
-### 2.3 使用神经元探测的训练与原论文测试集评测
+#### ActivityForensics 泛化评测
+
+读取该基线的 `best_acc.pth` 在新 benchmark 上生成预测，结果输出到 `../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval_activityforensics/`。
+
+```bash
+python DeMamba/eval_activityforensics.py \
+  --config DeMamba/configs/DINOv3_Tasle.yaml \
+  --model-path ../MSLoc_data/DeMamba/results/dinov3_baseline_4/best_acc.pth \
+  --annotation-dir ../MSLoc_data/ActivityForensics \
+  --video-root ../MSLoc_data/ActivityForensics \
+  --output-dir ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval_activityforensics \
+  --device-ids 0,1,2,3,4,5,6,7 \
+  --batch-size 16 \
+  --clean
+```
+
+读取上一步的预测评估 proposal 质量，结果输出到 `../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval_activityforensics/proposal_quality/`。
+
+```bash
+python evaluate_proposal_quality.py \
+  --gt-file ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval_activityforensics/predictions.json \
+  --infer-file ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval_activityforensics/predictions.json \
+  --output-dir ../MSLoc_data/DeMamba/results/dinov3_baseline_4/eval_activityforensics/proposal_quality \
+  --iou-thresholds 0.1,0.3,0.5,0.7 \
+  --domain-key tool_domain
+```
+
+### 2.3 使用神经元探测的训练与评测
 
 #### 第一步：构造真假帧对
 
@@ -283,7 +339,9 @@ python evaluate_long.py \
   --reuse-existing
 ```
 
-### 2.4 评测新 benchmark：ActivityForensics
+#### 第六步：评测 ActivityForensics
+
+读取神经元版的 `best_acc.pth` 在新 benchmark 上生成预测，结果输出到 `../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/`。
 
 ```bash
 python DeMamba/eval_activityforensics.py \
@@ -297,7 +355,9 @@ python DeMamba/eval_activityforensics.py \
   --clean
 ```
 
-完成上述评测后，运行proposal质量评测：
+#### 第七步：评估 proposal 质量
+
+读取上一步的预测评估 proposal 质量，结果输出到 `../MSLoc_data/DeMamba/results/dinov3_neurons_4/eval_activityforensics/proposal_quality/`。
 
 ```bash
 python evaluate_proposal_quality.py \
