@@ -246,17 +246,35 @@ def _validate_distinct_teacher_base(student_checkpoint: str, teacher_checkpoint:
     student_manifest = json.loads(student_manifest_path.read_text(encoding="utf-8"))
     if student_manifest.get("stage") != "candidate_sft":
         raise ValueError("The OPD student must be a candidate_sft checkpoint")
-    student_base = Path(student_manifest.get("base_checkpoint", "")).resolve()
-    teacher_base = Path(teacher_manifest.get("base_checkpoint", "")).resolve()
-    if student_base != teacher_base:
-        raise ValueError(
-            f"Student and paired teacher do not share the same original base weights: {student_base} != {teacher_base}"
+    student_base_value = student_manifest.get("base_checkpoint")
+    teacher_base_value = teacher_manifest.get("base_checkpoint")
+    if student_base_value is None or teacher_base_value is None:
+        print(
+            "WARNING: A legacy stage manifest does not record base_checkpoint; "
+            "the shared original weights cannot be verified automatically.",
+            flush=True,
         )
+    else:
+        student_base = Path(student_base_value).resolve()
+        teacher_base = Path(teacher_base_value).resolve()
+        if student_base != teacher_base:
+            raise ValueError(
+                f"Student and paired teacher do not share the same original base weights: {student_base} != {teacher_base}"
+            )
     for key in ("mm_projector_type", "closs"):
-        if student_manifest.get(key) != teacher_manifest.get(key):
+        student_value = student_manifest.get(key)
+        teacher_value = teacher_manifest.get(key)
+        if student_value is None or teacher_value is None:
+            print(
+                f"WARNING: A legacy stage manifest does not record {key}; "
+                "compatibility cannot be verified automatically.",
+                flush=True,
+            )
+            continue
+        if student_value != teacher_value:
             raise ValueError(
                 f"Student and paired teacher must use the same {key}: "
-                f"{student_manifest.get(key)!r} != {teacher_manifest.get(key)!r}"
+                f"{student_value!r} != {teacher_value!r}"
             )
     if student_manifest.get("closs"):
         student_hash = student_manifest.get("class_feature_sha256")

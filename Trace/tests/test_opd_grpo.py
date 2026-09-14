@@ -240,6 +240,44 @@ class OpdGrpoTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 launcher._validate_distinct_teacher_base(str(student), str(teacher))
 
+    def test_legacy_student_manifest_with_missing_architecture_is_allowed(self):
+        with tempfile.TemporaryDirectory() as root:
+            student = pathlib.Path(root) / "legacy_student"
+            teacher = pathlib.Path(root) / "paired_teacher"
+            student.mkdir()
+            teacher.mkdir()
+            (student / "stage_manifest.json").write_text(json.dumps({
+                "stage": "candidate_sft",
+                "base_checkpoint": "trace-uni",
+            }), encoding="utf-8")
+            (teacher / "stage_manifest.json").write_text(json.dumps({
+                "stage": "paired_teacher_sft",
+                "base_checkpoint": "trace-uni",
+                "mm_projector_type": "ref_projector",
+                "closs": True,
+            }), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                launcher._validate_distinct_teacher_base(str(student), str(teacher))
+            self.assertIn("does not record mm_projector_type", output.getvalue())
+            self.assertIn("does not record closs", output.getvalue())
+
+    def test_explicit_student_architecture_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            student = pathlib.Path(root) / "student"
+            teacher = pathlib.Path(root) / "paired_teacher"
+            student.mkdir()
+            teacher.mkdir()
+            common = {"base_checkpoint": "trace-uni", "closs": True}
+            (student / "stage_manifest.json").write_text(json.dumps({
+                **common, "stage": "candidate_sft", "mm_projector_type": "spatial_slot",
+            }), encoding="utf-8")
+            (teacher / "stage_manifest.json").write_text(json.dumps({
+                **common, "stage": "paired_teacher_sft", "mm_projector_type": "ref_projector",
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "same mm_projector_type"):
+                launcher._validate_distinct_teacher_base(str(student), str(teacher))
+
 
 if __name__ == "__main__":
     unittest.main()
