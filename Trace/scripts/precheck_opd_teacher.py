@@ -173,11 +173,17 @@ def main() -> None:
         parser.error("--clean and --resume are mutually exclusive")
 
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", args.gpu_id))
+    if not torch.cuda.is_available():
+        raise RuntimeError("precheck_opd_teacher.py requires a CUDA GPU")
+    # Bind each torchrun worker before NCCL creates its process group.  If this
+    # happens after init_process_group, every worker initially uses cuda:0 and
+    # NCCL rejects the job as a duplicate-GPU launch.
+    torch.cuda.set_device(local_rank)
     if distributed:
         dist.init_process_group("nccl")
     rank = dist.get_rank() if distributed else 0
     world_size = dist.get_world_size() if distributed else 1
-    local_rank = int(os.environ.get("LOCAL_RANK", args.gpu_id))
     output = Path(args.output)
     progress_dir = Path(str(output) + ".progress")
     progress_manifest = progress_dir / "run.json"
@@ -278,9 +284,6 @@ def main() -> None:
     remaining_records = [record for record in source_records if record["id"] not in completed]
     source_records = remaining_records[rank::world_size]
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
-    if not torch.cuda.is_available():
-        raise RuntimeError("precheck_opd_teacher.py requires a CUDA GPU")
     model_name = get_model_name_from_path(args.model_path)
     tokenizer, model, processor, _ = load_pretrained_model(
         args.model_path,
