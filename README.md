@@ -6,7 +6,7 @@
 
 1、【可直接运行】小模型阶段的 DINOv2/DINOv3 神经元探测实验，以及 DINOv2/DINOv3/XCLIP 在 ActivityForensics 上的泛化测试，详见 [补充说明](SupplyREADME.md)。
 
-2、【正在调试】大模型阶段以小模型阶段生成的proposal为基础，依次开展 SFT、OPD 与 GRPO 训练；运行说明请参阅 [运行指令](Trace/README_RUN_OPD_GRPO.md)。
+2、【可直接运行】大模型阶段以小模型阶段生成的proposal为基础，依次开展 SFT、OPD 与 GRPO 训练；运行说明请参阅 [运行指令](Trace/README_RUN_OPD_GRPO.md)。
 
 
 
