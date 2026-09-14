@@ -39,6 +39,40 @@ class CLIPVisionTower(nn.Module):
             raise ValueError(f'Unexpected select feature: {self.select_feature}')
         return image_features
 
+    def _native_image_hw(self):
+        image_size = self.config.image_size
+        if isinstance(image_size, (tuple, list)):
+            return int(image_size[0]), int(image_size[1])
+        return int(image_size), int(image_size)
+
+    def _encode_selected_features(self, pixel_values):
+        """Encode native images or a full-resolution vertical comparison.
+
+        A paired teacher frame is represented as one ``[C, 2H, W]`` tensor so
+        the input contract remains explicitly upper-reference/lower-candidate.
+        Running CLIP attention over the doubled-height patch grid needlessly
+        squares the attention memory and exceeds 24 GB cards.  Encode the two
+        native 24x24 grids separately, then concatenate their selected patch
+        features in upper/lower order.  This keeps every input pixel and the
+        same ordered patch tokens while bounding peak CLIP attention at
+        its pretrained native resolution.
+        """
+        native_h, native_w = self._native_image_hw()
+        if tuple(pixel_values.shape[-2:]) == (2 * native_h, native_w):
+            upper_pixels = pixel_values[..., :native_h, :]
+            lower_pixels = pixel_values[..., native_h:, :]
+
+            upper_outputs = self._forward_vision(upper_pixels)
+            upper_features = self.feature_select(upper_outputs)
+            del upper_outputs
+
+            lower_outputs = self._forward_vision(lower_pixels)
+            lower_features = self.feature_select(lower_outputs)
+            del lower_outputs
+            return torch.cat([upper_features, lower_features], dim=1)
+
+        return self.feature_select(self._forward_vision(pixel_values))
+
     def _forward_with_interpolated_positions(self, pixel_values):
         """Run CLIP on a non-native grid without resampling the input pixels.
 
@@ -47,8 +81,9 @@ class CLIPVisionTower(nn.Module):
         the same two-dimensional bicubic positional-embedding interpolation
         used by modern ViT/CLIP implementations, kept locally so the existing
         TRACE checkpoint and dependency versions remain compatible.  It is
-        used for the teacher's 672x336 reference/candidate canvas only; the
-        normal 336x336 student path below is unchanged.
+        retained as a compatibility path for other non-native image shapes.
+        Exact upper-reference/lower-candidate canvases are split into two
+        native CLIP calls by ``_encode_selected_features`` instead.
         """
         vision_model = self.vision_tower.vision_model
         embeddings = vision_model.embeddings
@@ -89,11 +124,7 @@ class CLIPVisionTower(nn.Module):
     def _forward_vision(self, pixel_values):
         """Keep TRACE's native path exact and interpolate only when necessary."""
         pixel_values = pixel_values.to(device=self.device, dtype=self.dtype)
-        image_size = self.config.image_size
-        if isinstance(image_size, (tuple, list)):
-            native_h, native_w = image_size
-        else:
-            native_h = native_w = image_size
+        native_h, native_w = self._native_image_hw()
         if tuple(pixel_values.shape[-2:]) == (native_h, native_w):
             return self.vision_tower(pixel_values, output_hidden_states=True)
         patch_size = self.config.patch_size
@@ -108,12 +139,10 @@ class CLIPVisionTower(nn.Module):
         if type(images) is list:
             image_features = []
             for image in images:
-                image_forward_out = self._forward_vision(image.unsqueeze(0))
-                image_feature = self.feature_select(image_forward_out).to(image.dtype)
+                image_feature = self._encode_selected_features(image.unsqueeze(0)).to(image.dtype)
                 image_features.append(image_feature)
         else:
-            image_forward_outs = self._forward_vision(images)
-            image_features = self.feature_select(image_forward_outs).to(images.dtype)
+            image_features = self._encode_selected_features(images).to(images.dtype)
 
         return image_features
 

@@ -26,10 +26,11 @@ def make_vertical_reference_pair(reference_video: torch.Tensor, candidate_video:
 
     Both inputs are already image-processor-normalized tensors shaped
     ``[T, C, H, W]``.  The result is ``[T, C, 2H, W]``: the upper and lower
-    views retain every original pixel.  TRACE's CLIP tower interpolates its
-    *positional embeddings* for this teacher-only non-square canvas (see
-    ``CLIPVisionTower``); resampling the actual frames would erase precisely
-    the fine texture and boundary evidence needed for forgery localization.
+    views retain every original pixel.  ``CLIPVisionTower`` recognizes this
+    exact two-panel shape, encodes both native-resolution halves separately,
+    and concatenates their patch features in upper/lower order.  This avoids
+    quadratic attention over a doubled-height patch grid without resampling
+    either view.
     """
     if reference_video.ndim != 4 or candidate_video.ndim != 4:
         raise ValueError("reference and candidate videos must be [T, C, H, W]")
