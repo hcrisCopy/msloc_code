@@ -310,9 +310,10 @@ python Trace/run_opd_grpo.py train-paired-teacher \
 
 这一步仍使用第 1 步在训练集上生成的 proposal。学生从第 2 步的 SFT 权重继续训练，只看待检测视频；通过预检的教师保持冻结，在同一个 proposal 上看“上方真实参考视频、下方待检测视频”的拼接画面。只有预检标记为可信的 proposal 才会计算教师指导部分的损失，训练期间只更新学生。这样学生在实际使用时仍然只需要待检测视频。
 
-下面的命令按“首次预检失败，重新训练的上下拼接教师已经通过预检”填写。
+下面的命令按“4.1教师预检失败，重新训练的上下拼接教师已经通过预检”执行。
+如果 4.1 首次检查已经通过，只需要把 `--teacher-model` 改为 `../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft`或者相应的教师模型权重。
 
-如果 4.1 首次检查已经通过，只把 `--teacher-model` 改为 `../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft`。`--student-model` 始终使用第 2 步的结果。
+`--student-model` 使用第 2 步的结果；如果已有按第 2 步同样方法训练好的学生 SFT 权重，可以直接把这个参数换成实际权重目录，不需要重新运行第 2 步。
 
 ```bash
 python Trace/run_opd_grpo.py opd \
@@ -472,7 +473,8 @@ python Trace/run_opd_grpo.py grpo \
 
 训练时主要查看定位、解释、格式、组内差异和文字矛盾这几项：`grpo_loc_reward`、`grpo_exp_reward`、`grpo_fmt_reward`、`grpo_group_std`、`grpo_text_contradiction`。
 
-若要使用不加载 NLI 模型的词面评分，把 `--text-reward-mode nli` 改为 `--text-reward-mode lexical`，删除三个 `--nli-*` 参数，并换一个输出目录。两种方法都应从同一个 OPD 权重开始，不能接着彼此的结果继续训练。
+若要使用不加载 NLI 模型的词面评分（另一种文本解释奖励方式，比较简单，可以不考虑），把 `--text-reward-mode nli` 改为 `--text-reward-mode lexical`，删除三个 `--nli-*` 参数，并换一个输出目录。
+两种方法都应从同一个 OPD 权重开始，不能接着彼此的结果继续训练。
 
 ## 7. 测试最终模型
 
