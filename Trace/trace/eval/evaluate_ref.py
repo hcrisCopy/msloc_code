@@ -165,12 +165,7 @@ def load_data(args, anno_path, split=None):
     return data
 
 
-def save_result(args, output_dir, results, split_name='test', format=False):
-    """Persist `results` to disk as a list (the caller has already built the final shape)."""
-
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-    # Output filename
+def result_file_name(args, split_name='test', format=False):
     file_name = f'{args.dataset}_{split_name}_f{args.num_frames}_result.json'
     if args.timestamp:
         if args.timestamp_file != '':
@@ -183,11 +178,25 @@ def save_result(args, output_dir, results, split_name='test', format=False):
         file_name = 'debug_' + file_name
     if format:
         file_name = 'fmt_' + file_name
+    return file_name
 
-    # Save the results list as-is.
-    with open(os.path.join(output_dir, file_name), 'w') as f:
+
+def save_result(args, output_dir, results, split_name='test', format=False):
+    """Atomically persist the final result list."""
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    file_name = result_file_name(args, split_name, format)
+
+    destination = Path(output_dir) / file_name
+    temporary = destination.with_suffix(destination.suffix + '.tmp')
+    with temporary.open('w', encoding='utf-8') as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
+    temporary.replace(destination)
     return
+
+
+def result_item_key(item):
+    return str(item.get('video_path') or item.get('video') or item.get('image_id') or item.get('id'))
 
 
 def get_timestamp_from_file(timestamp_file):
@@ -222,6 +231,41 @@ def main(args):
             return None
 
         builtins.print = _quiet_print
+
+    final_result_path = Path(args.output_dir) / result_file_name(args, args.split, format=True)
+    progress_path = final_result_path.with_suffix(final_result_path.suffix + '.progress.jsonl')
+    progress_manifest = progress_path.with_suffix(progress_path.suffix + '.run.json')
+    run_identity = {
+        'annotation': str(Path(args.anno_file).resolve()) if args.anno_file else str(Path(args.anno_path).resolve()),
+        'model': str(Path(args.model_path).resolve()),
+        'video_root': str(Path(args.video_path).resolve()),
+        'vision_tower': str(Path(args.vision_tower).resolve()) if args.vision_tower else None,
+        'prompt_file': str(Path(args.prompt_file).resolve()),
+        'num_frames': args.num_frames,
+        'max_new_tokens': args.max_new_tokens,
+        'sample_num': args.sample_num,
+        'num_chunks': args.num_chunks,
+        'chunk_idx': args.chunk_idx,
+        'bnd_ratio': args.bnd_ratio,
+        'bnd_frames': args.bnd_frames,
+        'seg_frames': args.seg_frames,
+    }
+    if args.resume:
+        if not progress_manifest.is_file():
+            raise FileNotFoundError(f"Resume metadata is missing: {progress_manifest}; clean and start again")
+        previous_identity = json.loads(progress_manifest.read_text(encoding='utf-8'))
+        if previous_identity != run_identity:
+            raise ValueError("Evaluation progress belongs to different inputs or parameters; clean and start again")
+        if final_result_path.is_file():
+            print(f"[resume] Chunk already complete: {final_result_path}")
+            return
+    else:
+        if final_result_path.exists():
+            raise FileExistsError(f"{final_result_path} exists; use --resume or clean the output directory")
+        if progress_manifest.exists():
+            raise FileExistsError(f"{progress_manifest} exists; use --resume or clean the output directory")
+        progress_manifest.parent.mkdir(parents=True, exist_ok=True)
+        progress_manifest.write_text(json.dumps(run_identity, ensure_ascii=False, indent=2), encoding='utf-8')
 
     # load model
     device = torch.device(int(args.gpu_id))
@@ -321,14 +365,29 @@ def main(args):
         anno_data = anno_data[start_idx:end_idx]
         print(f"Processing chunk {args.chunk_idx}/{args.num_chunks} (indices {start_idx}-{end_idx}, {len(anno_data)} samples)")
 
-    results = []
+    results_by_key = {}
+    if progress_path.exists() and not args.resume:
+        raise FileExistsError(f"{progress_path} exists; use --resume or clean the output directory")
+    if args.resume and progress_path.is_file():
+        with progress_path.open('r', encoding='utf-8') as handle:
+            for line in handle:
+                try:
+                    previous = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(previous, dict):
+                    results_by_key[result_item_key(previous)] = previous
+        print(f"[resume] Reusing {len(results_by_key)}/{len(anno_data)} completed videos")
+    pending_data = [item for item in anno_data if result_item_key(item) not in results_by_key]
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_handle = progress_path.open('a', encoding='utf-8', buffering=1)
     
     # Concurrent tqdm bars: one position per chunk.
     tqdm_position = int(getattr(args, 'tqdm_position', -1))
     if tqdm_position < 0:
         tqdm_position = int(getattr(args, 'chunk_idx', 0))
 
-    for item in tqdm(anno_data, position=tqdm_position, leave=True, dynamic_ncols=True):
+    for item in tqdm(pending_data, position=tqdm_position, leave=True, dynamic_ncols=True, desc=f"Eval chunk {args.chunk_idx}"):
         vname = item.get("image_id")
         # Try the relative path first.
         vid_path = os.path.join(video_path, vname)
@@ -499,8 +558,11 @@ def main(args):
         if 'video_path' not in final_output:
              final_output['video_path'] = item.get("image_id")
         
-        results.append(final_output)
+        results_by_key[result_item_key(final_output)] = final_output
+        progress_handle.write(json.dumps(final_output, ensure_ascii=False) + '\n')
 
+    progress_handle.close()
+    results = [results_by_key[result_item_key(item)] for item in anno_data if result_item_key(item) in results_by_key]
     save_result(args, args.output_dir, results, args.split, format=True)
 
     total_time = time.time() - eval_start_time
@@ -536,6 +598,7 @@ if __name__ == "__main__":
     parser.add_argument('--anno_file', type=str, default=None, help='Direct path to annotation file')
     parser.add_argument('--quiet_non_master', action='store_true', help='Only chunk0 prints normal logs (progress bars still show)')
     parser.add_argument('--tqdm_position', type=int, default=-1, help='tqdm position for multi-progress display; default uses chunk_idx')
+    parser.add_argument('--resume', action='store_true', help='Resume this evaluation chunk from its per-video JSONL progress')
     
     # Refinement-specific arguments.
     parser.add_argument('--bnd_ratio', type=float, default=0.2, help='Ratio of boundary region (each side).')

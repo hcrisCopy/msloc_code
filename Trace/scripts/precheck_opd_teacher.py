@@ -19,6 +19,7 @@ import argparse
 import copy
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
@@ -148,7 +149,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--replay", required=True, help="Normalized replay from build_opd_grpo_replay.py")
     parser.add_argument("--data-folder", required=True, help="Root that contains candidate and reference video paths")
-    parser.add_argument("--model-path", required=True, help="Frozen candidate-only SFT checkpoint; it is not updated")
+    parser.add_argument("--model-path", required=True, help="Frozen teacher checkpoint; candidate-SFT on the first attempt, paired-SFT after fallback")
     parser.add_argument("--vision-tower", required=True)
     parser.add_argument("--output", required=True, help="Output teacher precheck/cache JSON")
     parser.add_argument("--prompt-file", default=str(ROOT / "trace" / "prompts" / "dvc.txt"))
@@ -164,12 +165,12 @@ def main() -> None:
     parser.add_argument("--minimum-recovery-improvement", type=float, default=0.0)
     parser.add_argument("--maximum-negative-noevent-drop", type=float, default=0.02)
     parser.add_argument("--minimum-reliable-positive-rate", type=float, default=0.05)
-    parser.add_argument(
-        "--smoke-allow-failed-precheck",
-        action="store_true",
-        help="Smoke test only: write a marked cache and exit successfully when the quality gate fails.",
-    )
+    parser.add_argument("--resume", action="store_true", help="Resume from per-rank proposal progress saved beside --output")
+    parser.add_argument("--clean", action="store_true", help="Remove an old report and its progress before starting")
     args = parser.parse_args()
+
+    if args.clean and args.resume:
+        parser.error("--clean and --resume are mutually exclusive")
 
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if distributed:
@@ -177,6 +178,62 @@ def main() -> None:
     rank = dist.get_rank() if distributed else 0
     world_size = dist.get_world_size() if distributed else 1
     local_rank = int(os.environ.get("LOCAL_RANK", args.gpu_id))
+    output = Path(args.output)
+    progress_dir = Path(str(output) + ".progress")
+    progress_manifest = progress_dir / "run.json"
+    run_identity = {
+        "replay_path": str(Path(args.replay).resolve()),
+        "teacher_model_path": str(Path(args.model_path).resolve()),
+        "vision_tower": str(Path(args.vision_tower).resolve()),
+        "version": args.version,
+        "bnd_ratio": args.bnd_ratio,
+        "bnd_frames": args.bnd_frames,
+        "seg_frames": args.seg_frames,
+        "max_new_tokens": args.max_new_tokens,
+        "teacher_iou_gate": args.teacher_iou_gate,
+        "max_samples": args.max_samples,
+        "minimum_recovery_improvement": args.minimum_recovery_improvement,
+        "minimum_reliable_positive_rate": args.minimum_reliable_positive_rate,
+        "maximum_negative_noevent_drop": args.maximum_negative_noevent_drop,
+    }
+    setup_error = None
+    if rank == 0:
+        try:
+            if args.clean:
+                if output.is_file():
+                    output.unlink()
+                if progress_dir.is_dir():
+                    shutil.rmtree(progress_dir)
+            if output.exists() and not args.resume:
+                raise FileExistsError(f"{output} already exists; pass --clean to replace it or --resume to reuse it")
+            if args.resume:
+                if not progress_manifest.is_file():
+                    raise FileNotFoundError("Precheck resume metadata is missing; use --clean to start a new run")
+                previous_identity = json.loads(progress_manifest.read_text(encoding="utf-8"))
+                if previous_identity != run_identity:
+                    raise ValueError("Precheck progress belongs to different inputs or parameters; use --clean")
+            if args.resume and output.is_file():
+                print(f"Precheck is already complete: {output}")
+            else:
+                if progress_dir.exists() and not args.resume:
+                    raise FileExistsError(f"{progress_dir} already exists; pass --clean or --resume")
+                progress_dir.mkdir(parents=True, exist_ok=True)
+                if not progress_manifest.is_file():
+                    progress_manifest.write_text(json.dumps(run_identity, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            setup_error = f"{type(exc).__name__}: {exc}"
+    if distributed:
+        setup_status = [setup_error]
+        dist.broadcast_object_list(setup_status, src=0)
+        setup_error = setup_status[0]
+    if setup_error:
+        if distributed:
+            dist.destroy_process_group()
+        raise RuntimeError(setup_error)
+    if args.resume and output.is_file():
+        if distributed:
+            dist.destroy_process_group()
+        return
 
     if not args.model_path:
         parser.error("--model-path is empty; run 'source Trace/scripts/setup_opd_grpo_env.sh' or set SFT_CKPT")
@@ -204,7 +261,22 @@ def main() -> None:
         if not reference.get("reference_video") or not reference.get("reference_segment"):
             raise ValueError(f"Paired replay record {record.get('id')} has no resolved fake->real reference mapping")
 
-    source_records = source_records[rank::world_size]
+    source_order = [record["id"] for record in source_records]
+    completed: Dict[str, Dict[str, Any]] = {}
+    if args.resume:
+        for shard_path in progress_dir.glob("rank-*.jsonl"):
+            with shard_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict) and row.get("id") in source_order:
+                        completed[row["id"]] = row
+        if rank == 0 and completed:
+            print(f"[resume] Reusing {len(completed)}/{len(source_records)} checked proposals")
+    remaining_records = [record for record in source_records if record["id"] not in completed]
+    source_records = remaining_records[rank::world_size]
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
     if not torch.cuda.is_available():
@@ -233,6 +305,8 @@ def main() -> None:
         source_records, desc=f"Teacher precheck rank {rank}", unit="proposal",
         position=rank, leave=rank == 0, dynamic_ncols=True,
     )
+    shard_progress = progress_dir / f"rank-{rank}.jsonl"
+    progress_handle = shard_progress.open("a", encoding="utf-8", buffering=1)
     for index, record in enumerate(iterator, start=1):
         proposal = record["proposal"]
         start, end = float(proposal[0]), float(proposal[1])
@@ -269,7 +343,7 @@ def main() -> None:
             teacher_parsed.status == VALID_EVENT and teacher_iou >= args.teacher_iou_gate
             if positive else teacher_parsed.status == VALID_NO_EVENT
         )
-        checked.append({
+        checked_row = {
             "id": record["id"],
             "proposal": [start, end],
             "replay_bucket": record.get("replay_bucket"),
@@ -278,8 +352,11 @@ def main() -> None:
             "paired_teacher": {"parsed": teacher_parsed.as_dict(), "matched_iou": teacher_iou},
             "teacher_input_mode": teacher_input_mode,
             "teacher_reliable": reliable,
-        })
+        }
+        checked.append(checked_row)
+        progress_handle.write(json.dumps(checked_row, ensure_ascii=False) + "\n")
         iterator.set_postfix(candidate=candidate_parsed.status, pair=teacher_parsed.status, reliable=reliable)
+    progress_handle.close()
 
     if distributed:
         gathered = [None for _ in range(world_size)]
@@ -288,6 +365,11 @@ def main() -> None:
         if rank != 0:
             dist.destroy_process_group()
             return
+    checked = list(completed.values()) + checked
+    checked_by_id = {row["id"]: row for row in checked}
+    checked = [checked_by_id[record_id] for record_id in source_order if record_id in checked_by_id]
+    if len(checked) != len(source_order):
+        raise RuntimeError(f"Precheck completed {len(checked)}/{len(source_order)} proposals; report not written")
 
     candidate_metrics = _summary(checked, "candidate_only", args.teacher_iou_gate)
     teacher_metrics = _summary(checked, "paired_teacher", args.teacher_iou_gate)
@@ -309,6 +391,9 @@ def main() -> None:
         "teacher_model_path": str(Path(args.model_path).resolve()),
         "config": {
             "teacher_iou_gate": args.teacher_iou_gate,
+            "minimum_recovery_improvement": args.minimum_recovery_improvement,
+            "minimum_reliable_positive_rate": args.minimum_reliable_positive_rate,
+            "maximum_negative_noevent_drop": args.maximum_negative_noevent_drop,
             "bnd_ratio": args.bnd_ratio,
             "bnd_frames": args.bnd_frames,
             "seg_frames": args.seg_frames,
@@ -323,29 +408,23 @@ def main() -> None:
         "localized_rate_gain": recovery_gain,
         "negative_noevent_drop": negative_drop,
         "pair_benefit_passed": pair_benefit_passed,
-        "smoke_allow_failed_precheck": bool(args.smoke_allow_failed_precheck),
         "records": checked,
     }
-    output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_output = output.with_suffix(output.suffix + ".tmp")
+    temporary_output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_output.replace(output)
     print(json.dumps({"candidate_only": candidate_metrics, "paired_teacher": teacher_metrics, "cache": str(output)}, ensure_ascii=False, indent=2))
 
     if args.enforce_pair_benefit:
         if not pair_benefit_passed:
-            if args.smoke_allow_failed_precheck:
-                print(
-                    "[SMOKE ONLY] Teacher quality gate failed; continuing only to test the OPD/GRPO code path. "
-                    "The cache is marked unvalidated and must not be used for a formal experiment."
-                )
-            else:
-                raise SystemExit(
-                    "Paired frozen teacher did not pass the precheck: "
-                    f"localized-rate gain={recovery_gain:.4f} (required >= {args.minimum_recovery_improvement:.4f}), "
-                    f"reliable-positive rate={reliable_positive_rate:.4f} (required >= {args.minimum_reliable_positive_rate:.4f}), "
-                    f"negative no-event drop={negative_drop:.4f} (allowed <= {args.maximum_negative_noevent_drop:.4f}). "
-                    f"Report was still written to {output}; do not start OPD."
-                )
+            raise SystemExit(
+                "Paired frozen teacher did not pass the precheck: "
+                f"localized-rate gain={recovery_gain:.4f} (required >= {args.minimum_recovery_improvement:.4f}), "
+                f"reliable-positive rate={reliable_positive_rate:.4f} (required >= {args.minimum_reliable_positive_rate:.4f}), "
+                f"negative no-event drop={negative_drop:.4f} (allowed <= {args.maximum_negative_noevent_drop:.4f}). "
+                f"Report was still written to {output}; do not start OPD."
+            )
     if distributed:
         dist.destroy_process_group()
 

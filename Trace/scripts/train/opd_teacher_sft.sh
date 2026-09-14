@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Kept only so old launch notes fail safely.  This project no longer trains an
-# OPD teacher: use the frozen-SFT paired-video precheck instead.
+# Kept only so old launch notes fail with a useful migration message.
 set -euo pipefail
 
-echo "opd_teacher_sft.sh is retired: the OPD teacher must remain frozen. Running precheck_opd_teacher.sh instead." >&2
-exec "$(cd "$(dirname "$0")" && pwd)/precheck_opd_teacher.sh"
+echo "Use: python Trace/run_opd_grpo.py teacher-sft ..." >&2
+echo "The Python entry starts fallback teacher SFT from the original base checkpoint with upper=real/lower=candidate input." >&2
+exit 2

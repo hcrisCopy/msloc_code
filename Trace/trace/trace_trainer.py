@@ -307,13 +307,37 @@ class FrozenTrainableReference:
     parameter that cannot change.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, state=None):
         self._actor = model
-        self._state = {
-            name: parameter.detach().clone()
+        trainable = {
+            name: parameter
             for name, parameter in model.named_parameters()
             if parameter.requires_grad
         }
+        if state is None:
+            self._state = {
+                name: parameter.detach().clone()
+                for name, parameter in trainable.items()
+            }
+        else:
+            missing = sorted(set(trainable) - set(state))
+            unexpected = sorted(set(state) - set(trainable))
+            if missing or unexpected:
+                raise ValueError(
+                    "Frozen reference state does not match the actor's trainable parameters: "
+                    f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+                )
+            self._state = {}
+            for name, parameter in trainable.items():
+                tensor = state[name]
+                if tuple(tensor.shape) != tuple(parameter.shape):
+                    raise ValueError(
+                        f"Frozen reference tensor shape mismatch for {name}: "
+                        f"checkpoint={tuple(tensor.shape)}, actor={tuple(parameter.shape)}"
+                    )
+                self._state[name] = tensor.detach().to(
+                    device=parameter.device, dtype=parameter.dtype
+                ).clone()
         if not self._state:
             raise ValueError("The frozen reference has no trainable actor parameters to snapshot")
 
@@ -688,7 +712,10 @@ class TraceOPDTrainer(TraceGRPOTrainer):
 
     def __init__(self, *args, teacher_model=None, **kwargs):
         if teacher_model is None:
-            raise ValueError("OPD requires a frozen teacher checkpoint (normally the candidate-only SFT checkpoint used in precheck)")
+            raise ValueError(
+                "OPD requires the frozen checkpoint that passed precheck: candidate-SFT on the first attempt, "
+                "or the paired-SFT fallback teacher"
+            )
         super().__init__(*args, reference_model=teacher_model, explanation_judge=None, **kwargs)
         self.teacher_model = self.reference_model
         self._opd_metrics = {}

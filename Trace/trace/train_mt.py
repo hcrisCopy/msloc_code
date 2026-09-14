@@ -145,6 +145,7 @@ class DataArguments:
     opd_teacher_cache_path: Optional[str] = field(default=None, metadata={"help": "Required by OPD: JSON emitted by scripts/precheck_opd_teacher.py for the identical replay and frozen teacher checkpoint."})
     reference_map_path: Optional[str] = field(default=None, metadata={"help": "Optional candidate->real-reference mapping used only by OPD teacher paths."})
     use_reference_pair: bool = field(default=False, metadata={"help": "Internal: decode and vertically pair real references for OPD teacher stages only."})
+    train_on_reference_pair: bool = field(default=False, metadata={"help": "Internal: paired-teacher SFT uses the vertically concatenated clip as the supervised model input."})
 
 
 @dataclass
@@ -185,7 +186,7 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_bias: str = "none"
     # Training stage.  ``sft`` retains the original Trace/ref2 objective;
     # OPD and GRPO are selected only by the new scripts and never alter eval.
-    second_stage: str = field(default="sft", metadata={"help": "One of: sft, opd, grpo. opd_teacher_sft is explicitly retired."})
+    second_stage: str = field(default="sft", metadata={"help": "One of: sft, opd_teacher_sft, opd, grpo."})
     opd_weight: float = field(default=1.0)
     opd_temperature: float = field(default=1.0)
     opd_disagreement_iou_gate: float = field(default=0.3)
@@ -203,10 +204,6 @@ class TrainingArguments(transformers.TrainingArguments):
     )
     opd_teacher_iou_gate: float = field(default=0.3)
     opd_teacher_model_path: Optional[str] = field(default=None)
-    opd_smoke_allow_unvalidated_teacher: bool = field(
-        default=False,
-        metadata={"help": "Smoke test only: permit a cache explicitly marked by --smoke-allow-failed-precheck."},
-    )
     grpo_group_size: int = field(default=4)
     grpo_temperature: float = field(default=0.7)
     grpo_max_new_tokens: int = field(default=128)
@@ -315,6 +312,65 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         }
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
+
+
+def load_trainable_checkpoint_state(checkpoint_dir: str, parameter_names: Sequence[str]) -> Dict[str, torch.Tensor]:
+    """Load only the actor parameters needed by a frozen OPD teacher.
+
+    Candidate SFT and paired-teacher SFT share the untouched base backbone,
+    while TRACE updates the projector, embeddings, and output heads. Loading
+    those named tensors into ``FrozenTrainableReference`` preserves the exact
+    paired-SFT teacher without creating a second optimizer/DDP model.
+    Hugging Face single-file and sharded safetensors/bin checkpoints are both
+    supported.
+    """
+    root = pathlib.Path(checkpoint_dir)
+    wanted = set(parameter_names)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Teacher checkpoint directory does not exist: {checkpoint_dir}")
+
+    index_candidates = (root / "model.safetensors.index.json", root / "pytorch_model.bin.index.json")
+    index_path = next((path for path in index_candidates if path.is_file()), None)
+    shard_to_names: Dict[pathlib.Path, set] = {}
+    if index_path is not None:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        weight_map = index.get("weight_map", {})
+        for name in wanted:
+            shard = weight_map.get(name)
+            if shard:
+                shard_to_names.setdefault(root / shard, set()).add(name)
+    else:
+        single = next(
+            (path for path in (root / "model.safetensors", root / "pytorch_model.bin") if path.is_file()),
+            None,
+        )
+        if single is None:
+            raise FileNotFoundError(
+                f"No model.safetensors/model index/pytorch_model.bin found in teacher checkpoint {checkpoint_dir}"
+            )
+        shard_to_names[single] = wanted
+
+    loaded: Dict[str, torch.Tensor] = {}
+    for shard_path, names in shard_to_names.items():
+        if shard_path.suffix == ".safetensors":
+            from safetensors import safe_open
+            with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
+                available = set(handle.keys())
+                for name in names & available:
+                    loaded[name] = handle.get_tensor(name)
+        else:
+            payload = torch.load(str(shard_path), map_location="cpu")
+            state = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
+            for name in names:
+                if name in state:
+                    loaded[name] = state[name]
+
+    missing = sorted(wanted - set(loaded))
+    if missing:
+        raise KeyError(
+            f"Teacher checkpoint {checkpoint_dir} is missing {len(missing)} trainable tensors; first: {missing[:5]}"
+        )
+    return loaded
 
 
 def smart_tokenizer_and_embedding_resize(
@@ -1278,8 +1334,8 @@ class LazySupervisedDataset(Dataset):
             # A reference is a training-only privileged input.  It must be a
             # real, separately mapped clip with an explicit aligned interval;
             # copying the candidate here would make OPD scientifically invalid.
-            # Teacher tensors exist only in OPD. SFT and GRPO remain strictly
-            # candidate-only and should not carry duplicate teacher inputs.
+            # Paired tensors exist only in fallback teacher-SFT and OPD.
+            # Ordinary SFT and GRPO remain strictly candidate-only.
             teacher_video = None
             has_reference_pair = False
             reference = sources.get('reference')
@@ -1319,16 +1375,18 @@ class LazySupervisedDataset(Dataset):
             data_dict = dict(input_ids=data_dict["input_ids"][0], labels=data_dict["labels"][0])
 
             # The frozen teacher gets an explicit description of the vertical
-            # pair.  Keep a separate prompt tensor: the candidate-only student
+            # pair. Keep a separate prompt tensor: the candidate-only student
             # must never be trained with a claim that it can see the reference.
+            teacher_processed = None
             if teacher_video is not None:
                 teacher_conv = copy.deepcopy(conv)
                 if has_reference_pair:
                     teacher_conv[0]["value"] = "<video>\n" + PAIR_REFERENCE_INSTRUCTION + teacher_conv[0]["value"].replace("<video>\n", "", 1)
                     teacher_sources = preprocess_multimodal(copy.deepcopy([teacher_conv]), self.data_args)
                     teacher_processed = preprocess(teacher_sources, self.tokenizer, MODAL_list=MODAL_list)
-                    data_dict["teacher_input_ids"] = teacher_processed["input_ids"][0]
-                    data_dict["teacher_labels"] = teacher_processed["labels"][0]
+                    if not self.data_args.train_on_reference_pair:
+                        data_dict["teacher_input_ids"] = teacher_processed["input_ids"][0]
+                        data_dict["teacher_labels"] = teacher_processed["labels"][0]
                 else:
                     data_dict["teacher_input_ids"] = data_dict["input_ids"].clone()
                     data_dict["teacher_labels"] = data_dict["labels"].clone()
@@ -1337,7 +1395,19 @@ class LazySupervisedDataset(Dataset):
             data_dict['score'] = scores
             data_dict['video'] = video
             data_dict['video_timestamps'] = video_timestamps
-            if teacher_video is not None:
+            if self.data_args.train_on_reference_pair:
+                if teacher_video is None or teacher_processed is None:
+                    raise ValueError(
+                        "Paired-teacher SFT requires an explicit aligned real/candidate pair for every replay record"
+                    )
+                # In the fallback teacher SFT stage the supervised model itself
+                # sees upper=real and lower=candidate. The target and candidate
+                # timestamps are unchanged, so only the visual input contract
+                # differs from ordinary ref2 SFT.
+                data_dict["input_ids"] = teacher_processed["input_ids"][0]
+                data_dict["labels"] = teacher_processed["labels"][0]
+                data_dict["video"] = teacher_video
+            elif teacher_video is not None:
                 data_dict['teacher_video'] = teacher_video
                 data_dict['teacher_video_timestamps'] = video_timestamps
             data_dict['rl_target'] = {
@@ -2239,23 +2309,25 @@ def train(attn_implementation="eager"):
         else:
             rank0_print("[CLoss WARNING] Model does not have class_to_idx, Dataset will use dynamically collected classes")
         
-    # Do not decode privileged pairs for ordinary ref2 SFT or deployment-style
-    # GRPO. Only candidate-only OPD may access them through a frozen teacher.
-    data_args.use_reference_pair = training_args.second_stage == "opd"
+    # Privileged pairs exist only in the fallback teacher-SFT and OPD teacher
+    # paths. Ordinary ref2 SFT, the OPD student, GRPO, and evaluation remain
+    # candidate-only.
+    data_args.use_reference_pair = training_args.second_stage in {"opd_teacher_sft", "opd"}
+    data_args.train_on_reference_pair = training_args.second_stage == "opd_teacher_sft"
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args, class_to_idx=model_class_to_idx)
     # Select the second-stage objective.  GRPO starts from the current OPD
     # checkpoint and freezes an exact copy as its KL reference.
     if training_args.second_stage not in {"sft", "opd_teacher_sft", "opd", "grpo"}:
         raise ValueError(f"Unknown --second_stage {training_args.second_stage!r}")
-    if training_args.second_stage in {"opd", "grpo"}:
+    if training_args.second_stage in {"opd_teacher_sft", "opd", "grpo"}:
         if not data_args.replay_path:
             raise ValueError(f"{training_args.second_stage.upper()} requires a normalized replay")
         replay_manifest = json.load(open(data_args.replay_path, "r", encoding="utf-8"))
         if not isinstance(replay_manifest, dict) or not isinstance(replay_manifest.get("records"), list):
             raise ValueError("OPD/GRPO replay must be an object containing a records list")
-        if training_args.second_stage == "opd" and replay_manifest.get("paired_only") is not True:
+        if training_args.second_stage in {"opd_teacher_sft", "opd"} and replay_manifest.get("paired_only") is not True:
             raise ValueError(
-                "OPD is restricted to fake videos with an existing `_real` counterpart. "
+                "Paired teacher SFT/OPD is restricted to fake videos with an existing `_real` counterpart. "
                 "Rebuild replay with scripts/build_opd_grpo_replay.py --paired-only --video-root ..."
             )
     if training_args.second_stage == "grpo":
@@ -2294,10 +2366,20 @@ def train(attn_implementation="eager"):
             **data_module,
         )
     elif training_args.second_stage == "opd_teacher_sft":
-        raise ValueError(
-            "opd_teacher_sft is retired for this method. Keep the SFT checkpoint frozen and run "
-            "scripts/precheck_opd_teacher.py before candidate-only OPD."
-        )
+        if data_args.train_mode != "ref2" or not data_args.replay_path:
+            raise ValueError("Paired teacher SFT requires train_mode=ref2 and a normalized paired replay")
+        missing_pairs = [
+            sample.get("replay_record", {}).get("id", sample.get("video"))
+            for sample in data_module["train_dataset"].list_data_dict
+            if not sample.get("reference") or not sample["reference"].get("reference_video")
+            or not (sample["reference"].get("reference_segment") or sample["reference"].get("reference_window"))
+        ]
+        if missing_pairs:
+            raise ValueError(
+                f"Paired teacher SFT has {len(missing_pairs)} records without an aligned reference; first: {missing_pairs[0]}"
+            )
+        rank0_print("Training fallback OPD teacher on upper=real/lower=candidate paired inputs")
+        trainer = TraceTrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
     elif training_args.second_stage == "opd":
         if data_args.train_mode != "ref2" or not data_args.replay_path:
             raise ValueError("OPD must use train_mode=ref2 and normalized replay with real reference mappings")
@@ -2312,22 +2394,10 @@ def train(attn_implementation="eager"):
                 "The paired-input teacher must be validated before distillation."
             )
         cache_manifest = json.load(open(data_args.opd_teacher_cache_path, "r", encoding="utf-8"))
-        smoke_cache_allowed = (
-            training_args.opd_smoke_allow_unvalidated_teacher
-            and isinstance(cache_manifest, dict)
-            and cache_manifest.get("smoke_allow_failed_precheck") is True
-        )
-        if not isinstance(cache_manifest, dict) or (
-            cache_manifest.get("pair_benefit_passed") is not True and not smoke_cache_allowed
-        ):
+        if not isinstance(cache_manifest, dict) or cache_manifest.get("pair_benefit_passed") is not True:
             raise ValueError(
                 "OPD teacher cache did not pass the localization/reliability precheck. "
                 "Do not start OPD with an unvalidated paired teacher."
-            )
-        if smoke_cache_allowed and cache_manifest.get("pair_benefit_passed") is not True:
-            print(
-                "[SMOKE ONLY] Running OPD with an unvalidated teacher cache to test the code path. "
-                "Unreliable records remain excluded from OPD KL; this run has no experimental validity."
             )
         cached_teacher_path = cache_manifest.get("teacher_model_path") if isinstance(cache_manifest, dict) else None
         if cached_teacher_path and os.path.normcase(os.path.abspath(cached_teacher_path)) != os.path.normcase(os.path.abspath(training_args.opd_teacher_model_path)):
@@ -2369,12 +2439,20 @@ def train(attn_implementation="eager"):
         ):
             if getattr(training_args, name) < 0:
                 raise ValueError(f"--{name} must be non-negative")
-        if os.path.normcase(os.path.abspath(training_args.opd_teacher_model_path)) != os.path.normcase(os.path.abspath(model_args.model_name_or_path)):
-            raise ValueError(
-                "OPD's frozen teacher must be the same SFT checkpoint used to initialize the student. "
-                "This allows the immutable backbone to be shared without changing teacher logits."
+        teacher_path = os.path.normcase(os.path.abspath(training_args.opd_teacher_model_path))
+        student_path = os.path.normcase(os.path.abspath(model_args.model_name_or_path))
+        if teacher_path == student_path:
+            teacher_model = FrozenTrainableReference(model).eval()
+        else:
+            trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+            rank0_print(
+                f"Loading {len(trainable_names)} frozen paired-teacher tensors from "
+                f"{training_args.opd_teacher_model_path}"
             )
-        teacher_model = FrozenTrainableReference(model).eval()
+            teacher_state = load_trainable_checkpoint_state(
+                training_args.opd_teacher_model_path, trainable_names
+            )
+            teacher_model = FrozenTrainableReference(model, state=teacher_state).eval()
         trainer = TraceOPDTrainer(
             model=model,
             tokenizer=tokenizer,
