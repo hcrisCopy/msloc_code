@@ -1,6 +1,10 @@
 import importlib.util
+import contextlib
+import io
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -209,6 +213,32 @@ class OpdGrpoTests(unittest.TestCase):
             "--training-samples", "samples.json", "--base-model", "trace-uni",
         ])
         self.assertIs(paired.handler, launcher.run_paired_teacher_sft)
+
+    def test_external_student_without_manifest_is_allowed_with_warning(self):
+        with tempfile.TemporaryDirectory() as root:
+            student = pathlib.Path(root) / "external_student"
+            teacher = pathlib.Path(root) / "paired_teacher"
+            student.mkdir()
+            teacher.mkdir()
+            (teacher / "stage_manifest.json").write_text(json.dumps({
+                "stage": "paired_teacher_sft",
+                "base_checkpoint": "trace-uni",
+                "mm_projector_type": "ref_projector",
+                "closs": True,
+            }), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                launcher._validate_distinct_teacher_base(str(student), str(teacher))
+            self.assertIn("trusted pre-existing candidate-only SFT checkpoint", output.getvalue())
+
+    def test_paired_teacher_still_requires_launcher_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            student = pathlib.Path(root) / "external_student"
+            teacher = pathlib.Path(root) / "paired_teacher"
+            student.mkdir()
+            teacher.mkdir()
+            with self.assertRaises(FileNotFoundError):
+                launcher._validate_distinct_teacher_base(str(student), str(teacher))
 
 
 if __name__ == "__main__":

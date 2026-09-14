@@ -214,19 +214,38 @@ def _write_stage_manifest(args, stage: str, extra: dict) -> None:
 
 
 def _validate_distinct_teacher_base(student_checkpoint: str, teacher_checkpoint: str) -> None:
-    if Path(student_checkpoint).resolve() == Path(teacher_checkpoint).resolve():
+    student_path = Path(student_checkpoint)
+    teacher_path = Path(teacher_checkpoint)
+    if student_path.resolve() == teacher_path.resolve():
         return
-    manifests = []
-    for checkpoint in (student_checkpoint, teacher_checkpoint):
-        manifest_path = Path(checkpoint) / "stage_manifest.json"
-        if not manifest_path.is_file():
-            raise FileNotFoundError(
-                f"Distinct OPD teacher requires provenance metadata created by this launcher: {manifest_path}"
-            )
-        manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
-    student_manifest, teacher_manifest = manifests
-    if student_manifest.get("stage") != "candidate_sft" or teacher_manifest.get("stage") != "paired_teacher_sft":
-        raise ValueError("Distinct OPD teacher must pair a candidate_sft student with a paired_teacher_sft teacher")
+
+    for role, checkpoint in (("student", student_path), ("teacher", teacher_path)):
+        if not checkpoint.is_dir():
+            raise FileNotFoundError(f"OPD {role} checkpoint directory does not exist: {checkpoint}")
+
+    teacher_manifest_path = teacher_path / "stage_manifest.json"
+    if not teacher_manifest_path.is_file():
+        raise FileNotFoundError(
+            "The separately trained paired teacher must have stage_manifest.json created by "
+            f"this launcher: {teacher_manifest_path}"
+        )
+    teacher_manifest = json.loads(teacher_manifest_path.read_text(encoding="utf-8"))
+    if teacher_manifest.get("stage") != "paired_teacher_sft":
+        raise ValueError("The distinct OPD teacher must be a paired_teacher_sft checkpoint")
+
+    student_manifest_path = student_path / "stage_manifest.json"
+    if not student_manifest_path.is_file():
+        print(
+            "WARNING: Student checkpoint has no stage_manifest.json, so its original base weights and "
+            "SFT settings cannot be verified automatically. Treating it as a trusted pre-existing "
+            f"candidate-only SFT checkpoint: {student_path}",
+            flush=True,
+        )
+        return
+
+    student_manifest = json.loads(student_manifest_path.read_text(encoding="utf-8"))
+    if student_manifest.get("stage") != "candidate_sft":
+        raise ValueError("The OPD student must be a candidate_sft checkpoint")
     student_base = Path(student_manifest.get("base_checkpoint", "")).resolve()
     teacher_base = Path(teacher_manifest.get("base_checkpoint", "")).resolve()
     if student_base != teacher_base:
