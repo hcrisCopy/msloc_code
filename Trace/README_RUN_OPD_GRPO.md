@@ -112,10 +112,6 @@ python DeMamba/eval.py \
 
 这一步复现论文第二阶段的 SFT。每个 proposal 按“左边界 16 帧、内部 8 帧、右边界 16 帧”抽取 40 帧；`ref_projector` 分别整理边界变化和片段内部信息，三个异常感知 token 再学习标注中的异常类别。模型同时学习是否存在伪造、伪造起止时间和文字解释。
 
-教师和学生在这里不是两种模型：两者都只看待检测视频，使用相同结构和训练数据，因此只训练一次。输出权重既作为首次教师检查的模型，也作为后续 OPD 学生的初始权重。只有第 4.2 节的失败恢复分支才改用上下拼接输入。
-
-旧的 `spatial_slot` SFT 权重与这里的结构不同，不能用 `--resume` 接着训练；第一次运行下面的新 SFT 命令时使用 `--clean`。
-
 ```bash
 conda activate trace
 python Trace/run_opd_grpo.py sft \
