@@ -9,6 +9,7 @@ resume, process interruption, and multi-GPU evaluation result merging.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -117,7 +118,31 @@ def _max_sample_args(value: int) -> List[str]:
     return [] if value == 0 else ["--max_samples", str(value)]
 
 
+def _validate_train_architecture(args) -> None:
+    if args.mm_projector_type == "ref_projector":
+        expected_frames = 2 * args.bnd_frames + args.seg_frames
+        if args.num_frames != expected_frames:
+            raise ValueError(
+                "ref_projector requires --num-frames = 2 * --bnd-frames + --seg-frames; "
+                f"got {args.num_frames} != 2 * {args.bnd_frames} + {args.seg_frames}"
+            )
+    if args.closs == "True" and not Path(args.class_feature_path).is_file():
+        raise FileNotFoundError(
+            "--closs true requires the pre-computed class feature file: "
+            f"{args.class_feature_path}"
+        )
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _common_train_args(args, model_path: str, output: str) -> List[str]:
+    _validate_train_architecture(args)
     save_args = ["--save_strategy", args.save_strategy]
     if args.save_strategy == "steps":
         if args.save_steps <= 0:
@@ -128,6 +153,8 @@ def _common_train_args(args, model_path: str, output: str) -> List[str]:
         "--version", args.version,
         "--vision_tower", args.vision_tower,
         "--mm_projector_type", args.mm_projector_type,
+        "--closs", args.closs,
+        "--class_feature_path", args.class_feature_path,
         "--freeze_mm_mlp_adapter", args.freeze_mm_mlp_adapter,
         "--tune_mm_mlp_adapter", args.tune_mm_mlp_adapter,
         "--tune_mm_embed_head", args.tune_mm_embed_head,
@@ -206,6 +233,19 @@ def _validate_distinct_teacher_base(student_checkpoint: str, teacher_checkpoint:
         raise ValueError(
             f"Student and paired teacher do not share the same original base weights: {student_base} != {teacher_base}"
         )
+    for key in ("mm_projector_type", "closs"):
+        if student_manifest.get(key) != teacher_manifest.get(key):
+            raise ValueError(
+                f"Student and paired teacher must use the same {key}: "
+                f"{student_manifest.get(key)!r} != {teacher_manifest.get(key)!r}"
+            )
+    if student_manifest.get("closs"):
+        student_hash = student_manifest.get("class_feature_sha256")
+        teacher_hash = teacher_manifest.get("class_feature_sha256")
+        if not student_hash or student_hash != teacher_hash:
+            raise ValueError(
+                "Student and paired teacher must use the identical class_features_bge.pt file"
+            )
 
 
 def run_sft(args) -> None:
@@ -218,10 +258,15 @@ def run_sft(args) -> None:
         "proposals": args.proposals,
         "annotation": args.annotation,
         "input_mode": "candidate_only",
+        "mm_projector_type": args.mm_projector_type,
+        "closs": args.closs == "True",
+        "class_feature_path": args.class_feature_path,
+        "class_feature_sha256": _file_sha256(args.class_feature_path) if args.closs == "True" else None,
+        "freeze_backbone": args.freeze_backbone == "True",
     })
 
 
-def run_teacher_sft(args) -> None:
+def run_paired_teacher_sft(args) -> None:
     _prepare_output(args)
     train_args = _common_train_args(args, args.base_checkpoint, args.output)
     train_args += ["--replay_path", args.replay, "--replay_balance", "none", "--second_stage", "opd_teacher_sft"]
@@ -231,6 +276,11 @@ def run_teacher_sft(args) -> None:
         "replay": args.replay,
         "annotation": args.annotation,
         "input_mode": "upper_real_lower_candidate",
+        "mm_projector_type": args.mm_projector_type,
+        "closs": args.closs == "True",
+        "class_feature_path": args.class_feature_path,
+        "class_feature_sha256": _file_sha256(args.class_feature_path) if args.closs == "True" else None,
+        "freeze_backbone": args.freeze_backbone == "True",
     })
 
 
@@ -263,6 +313,8 @@ def run_opd(args) -> None:
         "replay": args.replay,
         "student_input_mode": "candidate_only",
         "teacher_input_mode": "upper_real_lower_candidate",
+        "mm_projector_type": args.mm_projector_type,
+        "closs": args.closs == "True",
     })
 
 
@@ -296,6 +348,8 @@ def run_grpo(args) -> None:
     _write_stage_manifest(args, "grpo", {
         "opd_checkpoint": args.opd_checkpoint, "replay": args.replay,
         "input_mode": "candidate_only", "text_reward_mode": args.text_reward_mode,
+        "mm_projector_type": args.mm_projector_type,
+        "closs": args.closs == "True",
     })
 
 
@@ -447,7 +501,9 @@ def add_distributed(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--nproc-per-node", type=int, required=True)
 
 
-def add_train_common(parser: argparse.ArgumentParser, *, default_lr: float) -> None:
+def add_train_common(
+        parser: argparse.ArgumentParser, *, default_lr: float,
+        default_freeze_backbone: str = "True") -> None:
     add_distributed(parser)
     parser.add_argument("--annotation", required=True)
     parser.add_argument("--video-root", required=True)
@@ -455,12 +511,18 @@ def add_train_common(parser: argparse.ArgumentParser, *, default_lr: float) -> N
     parser.add_argument("--deepspeed", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--version", default="v1_mistral")
-    parser.add_argument("--mm-projector-type", default="spatial_slot")
+    parser.add_argument("--mm-projector-type", default="ref_projector")
+    parser.add_argument("--closs", type=_bool, default="True")
+    parser.add_argument(
+        "--class-feature-path",
+        default="../MSLoc_data/Trace/class_features_bge.pt",
+        help="Pre-computed bge-large-en-v1.5 anomaly-class features used by --closs true",
+    )
     parser.add_argument("--freeze-mm-mlp-adapter", type=_bool, default="False")
     parser.add_argument("--tune-mm-mlp-adapter", type=_bool, default="True")
     parser.add_argument("--tune-mm-embed-head", type=_bool, default="True")
     parser.add_argument("--tune-lm-embed-head", type=_bool, default="True")
-    parser.add_argument("--freeze-backbone", type=_bool, default="True")
+    parser.add_argument("--freeze-backbone", type=_bool, default=default_freeze_backbone)
     parser.add_argument("--bnd-ratio", type=float, default=0.2)
     parser.add_argument("--bnd-frames", type=int, default=16)
     parser.add_argument("--seg-frames", type=int, default=8)
@@ -499,8 +561,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="stage", required=True)
 
-    sft = subparsers.add_parser("sft", help="Candidate-only ref2 SFT")
-    add_train_common(sft, default_lr=5e-6)
+    sft = subparsers.add_parser(
+        "sft", aliases=["student-sft", "teacher-sft"],
+        help="Candidate-only paper ref2 SFT; one checkpoint can serve as the initial teacher and student",
+    )
+    add_train_common(sft, default_lr=5e-6, default_freeze_backbone="False")
     sft.add_argument("--proposals", required=True)
     sft.add_argument("--base-model", "--base-checkpoint", dest="base_checkpoint", required=True)
     sft.set_defaults(handler=run_sft)
@@ -549,13 +614,13 @@ def build_parser() -> argparse.ArgumentParser:
     precheck.set_defaults(handler=run_precheck)
 
     teacher = subparsers.add_parser(
-        "train-paired-teacher", aliases=["teacher-sft"],
+        "train-paired-teacher", aliases=["paired-teacher-sft"],
         help="Train the fallback teacher on upper-real/lower-candidate inputs",
     )
-    add_train_common(teacher, default_lr=5e-6)
+    add_train_common(teacher, default_lr=5e-6, default_freeze_backbone="False")
     teacher.add_argument("--training-samples", "--replay", dest="replay", required=True)
     teacher.add_argument("--base-model", "--base-checkpoint", dest="base_checkpoint", required=True)
-    teacher.set_defaults(handler=run_teacher_sft)
+    teacher.set_defaults(handler=run_paired_teacher_sft)
 
     opd = subparsers.add_parser("opd", help="Candidate-only student with a frozen paired-input teacher")
     add_train_common(opd, default_lr=2e-6)

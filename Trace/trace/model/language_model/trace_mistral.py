@@ -123,6 +123,7 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
         score_logits = self.score_head(hidden_states).float()
 
         loss = None
+        self.last_closs = 0.0
         if labels is not None:
             loss = (
                 self._head_cross_entropy(text_logits, labels, self.vocab_size + 1)
@@ -144,7 +145,11 @@ class TraceMistralForCausalLM(MistralForCausalLM, TraceMetaForCausalLM):
                     cls_logits = self.get_model().closs_head(gathered)
                     cls_targets = torch.stack([closs_labels[row] for row, _ in valid_rows]).to(cls_logits.device)
                     if torch.any(cls_targets.ne(-100)):
-                        loss = loss + CrossEntropyLoss()(cls_logits.reshape(-1, cls_logits.shape[-1]), cls_targets.reshape(-1))
+                        closs_loss = CrossEntropyLoss()(
+                            cls_logits.reshape(-1, cls_logits.shape[-1]), cls_targets.reshape(-1)
+                        )
+                        loss = loss + closs_loss
+                        self.last_closs = closs_loss.detach()
 
         logits = text_logits
         if heads is not None:

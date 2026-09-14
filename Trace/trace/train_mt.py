@@ -139,6 +139,10 @@ class DataArguments:
     
     # Ref2 Mode Arguments
     proposal_path: str = field(default=None, metadata={"help": "Path to the proposal file for ref2 mode."})
+    class_feature_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Pre-computed bge-large-en-v1.5 class features required when --closs is enabled."},
+    )
     max_samples: Optional[int] = field(default=None, metadata={"help": "Use only the first N constructed ref2 samples (debug only)."})
     replay_path: Optional[str] = field(default=None, metadata={"help": "Normalized replay JSON from scripts/build_opd_grpo_replay.py."})
     replay_balance: str = field(default="none", metadata={"help": "Replay fractions positive,hard_positive,near_hard_negative,real_false_positive; use none to retain source frequency."})
@@ -315,12 +319,13 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
 
 
 def load_trainable_checkpoint_state(checkpoint_dir: str, parameter_names: Sequence[str]) -> Dict[str, torch.Tensor]:
-    """Load only the actor parameters needed by a frozen OPD teacher.
+    """Load the requested actor parameters needed by a frozen OPD teacher.
 
-    Candidate SFT and paired-teacher SFT share the untouched base backbone,
-    while TRACE updates the projector, embeddings, and output heads. Loading
-    those named tensors into ``FrozenTrainableReference`` preserves the exact
-    paired-SFT teacher without creating a second optimizer/DDP model.
+    The caller normally requests only parameters that can change in the
+    current stage. For a distinct teacher produced by full-model SFT, it
+    requests every parameter so the teacher remains exact even when OPD later
+    freezes the student backbone. ``FrozenTrainableReference`` substitutes the
+    loaded tensors without constructing a second optimizer/DDP model.
     Hugging Face single-file and sharded safetensors/bin checkpoints are both
     supported.
     """
@@ -359,7 +364,7 @@ def load_trainable_checkpoint_state(checkpoint_dir: str, parameter_names: Sequen
                 for name in names & available:
                     loaded[name] = handle.get_tensor(name)
         else:
-            payload = torch.load(str(shard_path), map_location="cpu")
+            payload = torch.load(str(shard_path), map_location="cpu", weights_only=True)
             state = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
             for name in names:
                 if name in state:
@@ -2005,6 +2010,10 @@ def train(attn_implementation="eager"):
         config._attn_implementation = attn_implementation
         config.downsample_num = model_args.downsample_num
         config.closs = model_args.closs
+        config.bnd_frames = data_args.bnd_frames
+        config.seg_frames = data_args.seg_frames
+        if data_args.num_frames is not None:
+            config.num_frames = data_args.num_frames
         if model_args.vision_tower is not None:
             config.mm_vision_tower = model_args.vision_tower
             config.vision_tower = model_args.vision_tower
@@ -2444,13 +2453,18 @@ def train(attn_implementation="eager"):
         if teacher_path == student_path:
             teacher_model = FrozenTrainableReference(model).eval()
         else:
-            trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+            # The paper SFT updates the backbone. A separately trained paired
+            # teacher can therefore differ from the student in frozen OPD
+            # parameters as well as in currently trainable heads/projectors.
+            # Load every parameter so the frozen teacher is the exact selected
+            # checkpoint rather than a student/teacher hybrid.
+            teacher_parameter_names = [name for name, _ in model.named_parameters()]
             rank0_print(
-                f"Loading {len(trainable_names)} frozen paired-teacher tensors from "
+                f"Loading {len(teacher_parameter_names)} frozen paired-teacher tensors from "
                 f"{training_args.opd_teacher_model_path}"
             )
             teacher_state = load_trainable_checkpoint_state(
-                training_args.opd_teacher_model_path, trainable_names
+                training_args.opd_teacher_model_path, teacher_parameter_names
             )
             teacher_model = FrozenTrainableReference(model, state=teacher_state).eval()
         trainer = TraceOPDTrainer(

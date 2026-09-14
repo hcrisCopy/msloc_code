@@ -19,6 +19,7 @@ def load_module(name, relative):
 opd = load_module("opd_grpo_test", "trace/opd_grpo.py")
 replay = load_module("replay_test", "scripts/build_opd_grpo_replay.py")
 text_reward = load_module("text_reward_test", "trace/text_explanation_reward.py")
+launcher = load_module("run_opd_grpo_test", "run_opd_grpo.py")
 
 
 class OpdGrpoTests(unittest.TestCase):
@@ -177,6 +178,37 @@ class OpdGrpoTests(unittest.TestCase):
         facts = text_reward.evidence_facts(evidence)
         self.assertEqual([fact.relation for fact in facts], ["object_anomaly", "onset", "offset"])
         self.assertEqual([fact.weight for fact in facts], [2.0, 1.0, 1.0])
+
+    def test_candidate_sft_aliases_use_paper_architecture_without_pairing(self):
+        common = [
+            "--devices", "0", "--nproc-per-node", "1",
+            "--annotation", "train.json", "--video-root", "videos",
+            "--vision-tower", "clip", "--deepspeed", "zero2.json",
+            "--output", "output", "--epochs", "2", "--batch-size", "2",
+            "--grad-accum", "2", "--num-workers", "4", "--run-name", "sft",
+            "--proposals", "proposals.json", "--base-model", "trace-uni",
+        ]
+        parser = launcher.build_parser()
+        for command in ("sft", "student-sft", "teacher-sft"):
+            args = parser.parse_args([command, *common])
+            self.assertIs(args.handler, launcher.run_sft)
+            self.assertEqual(args.mm_projector_type, "ref_projector")
+            self.assertEqual(args.closs, "True")
+            self.assertEqual(args.num_frames, 40)
+            self.assertEqual(args.bnd_frames, 16)
+            self.assertEqual(args.seg_frames, 8)
+            self.assertEqual(args.freeze_backbone, "False")
+
+        paired = parser.parse_args([
+            "paired-teacher-sft",
+            "--devices", "0", "--nproc-per-node", "1",
+            "--annotation", "train.json", "--video-root", "videos",
+            "--vision-tower", "clip", "--deepspeed", "zero2.json",
+            "--output", "output", "--epochs", "2", "--batch-size", "2",
+            "--grad-accum", "2", "--num-workers", "4", "--run-name", "paired",
+            "--training-samples", "samples.json", "--base-model", "trace-uni",
+        ])
+        self.assertIs(paired.handler, launcher.run_paired_teacher_sft)
 
 
 if __name__ == "__main__":

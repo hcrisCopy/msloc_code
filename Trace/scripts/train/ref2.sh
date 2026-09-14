@@ -10,6 +10,7 @@ MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_data" && pwd)"}
 DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 PROPOSAL_PATH=${PROPOSAL_PATH:?Set PROPOSAL_PATH to DeMamba predictions.json generated on the training split}
 BASE_CKPT=${BASE_CKPT:-"$MSLOC_ASSETS/Trace/ckpts/trace-uni"}
+CLASS_FEATURE_PATH=${CLASS_FEATURE_PATH:-"$MSLOC_ASSETS/Trace/class_features_bge.pt"}
 
 NPROC_PER_NODE=${NPROC_PER_NODE:-8}
 LOCAL_BATCH_SIZE=${BATCH_SIZE:-2}
@@ -47,7 +48,9 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --standalone --nproc_per_node "$NPROC_PER_NODE
     --deepspeed "$TRACE_DIR/scripts/zero2.json" \
     --version v1_mistral \
     --vision_tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
-    --mm_projector_type spatial_slot \
+    --mm_projector_type ref_projector \
+    --closs True \
+    --class_feature_path "$CLASS_FEATURE_PATH" \
     --freeze_mm_mlp_adapter False \
     --tune_mm_mlp_adapter True \
     --tune_mm_embed_head True \
@@ -67,7 +70,7 @@ ASCEND_LAUNCH_BLOCKING=1 torchrun --standalone --nproc_per_node "$NPROC_PER_NODE
     --mm_use_im_patch_token False \
     --downsample_num 1 \
     --image_aspect_ratio pad \
-    --freeze_backbone True \
+    --freeze_backbone False \
     --num_frames 40 \
     --bf16 True \
     --tf32 False \

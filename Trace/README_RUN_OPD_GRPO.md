@@ -34,6 +34,14 @@ hf download cross-encoder/nli-deberta-v3-small \
   --local-dir ../MSLoc_data/Trace/ckpts/nli-deberta-v3-small
 ```
 
+把预先生成的类别特征文件放到：
+
+```text
+../MSLoc_data/Trace/class_features_bge.pt
+```
+
+SFT、OPD 和 GRPO 必须始终使用同一份文件。它只提供异常类别名称及其 BGE 特征，不需要在训练时再次加载 BGE 模型。
+
 - 第一次运行使用 `--clean` 清理这个步骤以前的输出。恢复中断任务时必须去掉 `--clean`。
 - 恢复训练：把 `--resume none` 改为 `--resume auto`。
 - 恢复教师检查：把 `--resume none` 改为 `--resume auto`。
@@ -100,9 +108,13 @@ python DeMamba/eval.py \
 ../MSLoc_data/DeMamba/full/method/eval/predictions.json
 ```
 
-## 2. 训练只看待检测视频的基础模型
+## 2. 按论文方法训练只看待检测视频的模型
 
-这一步把每个训练集 proposal 对应的视频片段交给模型，再根据数据集标注准备正确答案：proposal 与伪造区间有重叠时，答案包含片段内的伪造起止时间、类型和解释；没有重叠时，答案是“没有伪造”。SFT 就是让模型反复学习这些“视频片段—正确答案”样本，使它只看待检测视频也能按规定格式完成判断、定位和解释。训练结果既用于首次教师检查，也是后续 OPD 学生模型的初始权重。
+这一步复现论文第二阶段的 SFT。每个 proposal 按“左边界 16 帧、内部 8 帧、右边界 16 帧”抽取 40 帧；`ref_projector` 分别整理边界变化和片段内部信息，三个异常感知 token 再学习标注中的异常类别。模型同时学习是否存在伪造、伪造起止时间和文字解释。
+
+教师和学生在这里不是两种模型：两者都只看待检测视频，使用相同结构和训练数据，因此只训练一次。输出权重既作为首次教师检查的模型，也作为后续 OPD 学生的初始权重。只有第 4.2 节的失败恢复分支才改用上下拼接输入。
+
+旧的 `spatial_slot` SFT 权重与这里的结构不同，不能用 `--resume` 接着训练；第一次运行下面的新 SFT 命令时使用 `--clean`。
 
 ```bash
 conda activate trace
@@ -117,12 +129,14 @@ python Trace/run_opd_grpo.py sft \
   --deepspeed Trace/scripts/zero2.json \
   --output ../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft \
   --version v1_mistral \
-  --mm-projector-type spatial_slot \
+  --mm-projector-type ref_projector \
+  --closs true \
+  --class-feature-path ../MSLoc_data/Trace/class_features_bge.pt \
   --freeze-mm-mlp-adapter false \
   --tune-mm-mlp-adapter true \
   --tune-mm-embed-head true \
   --tune-lm-embed-head true \
-  --freeze-backbone true \
+  --freeze-backbone false \
   --bnd-ratio 0.2 \
   --bnd-frames 16 \
   --seg-frames 8 \
@@ -246,12 +260,14 @@ python Trace/run_opd_grpo.py train-paired-teacher \
   --deepspeed Trace/scripts/zero2.json \
   --output ../MSLoc_data/Trace/experiments/opd_grpo/opd_teacher_paired_sft \
   --version v1_mistral \
-  --mm-projector-type spatial_slot \
+  --mm-projector-type ref_projector \
+  --closs true \
+  --class-feature-path ../MSLoc_data/Trace/class_features_bge.pt \
   --freeze-mm-mlp-adapter false \
   --tune-mm-mlp-adapter true \
   --tune-mm-embed-head true \
   --tune-lm-embed-head true \
-  --freeze-backbone true \
+  --freeze-backbone false \
   --bnd-ratio 0.2 \
   --bnd-frames 16 \
   --seg-frames 8 \
@@ -314,7 +330,9 @@ python Trace/run_opd_grpo.py opd \
   --deepspeed Trace/scripts/zero2.json \
   --output ../MSLoc_data/Trace/experiments/opd_grpo/opd \
   --version v1_mistral \
-  --mm-projector-type spatial_slot \
+  --mm-projector-type ref_projector \
+  --closs true \
+  --class-feature-path ../MSLoc_data/Trace/class_features_bge.pt \
   --freeze-mm-mlp-adapter false \
   --tune-mm-mlp-adapter true \
   --tune-mm-embed-head true \
@@ -392,7 +410,9 @@ python Trace/run_opd_grpo.py grpo \
   --deepspeed Trace/scripts/zero2.json \
   --output ../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli \
   --version v1_mistral \
-  --mm-projector-type spatial_slot \
+  --mm-projector-type ref_projector \
+  --closs true \
+  --class-feature-path ../MSLoc_data/Trace/class_features_bge.pt \
   --freeze-mm-mlp-adapter false \
   --tune-mm-mlp-adapter true \
   --tune-mm-embed-head true \

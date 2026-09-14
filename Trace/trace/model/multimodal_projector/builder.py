@@ -703,26 +703,36 @@ class DiffGuidedSpatialSlotPool(nn.Module):
 class RefProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # Boundary parts: 16 frames per side. Time dimension is preserved so
+        self.bnd_frames = int(getattr(config, "bnd_frames", 16))
+        self.seg_frames = int(getattr(config, "seg_frames", 8))
+        if self.bnd_frames <= 0 or self.seg_frames <= 0:
+            raise ValueError("RefProjector requires positive bnd_frames and seg_frames")
+
+        # Boundary parts: bnd_frames per side. Time dimension is preserved so
         # we get one compressed token per frame plus its time token.
         self.boundary_proj = DiffGuidedSpatialSlotPool(config, num_slots=8)
 
-        # Event part: 8 frames -> a fixed pool of 32 tokens.
+        # Event part -> a fixed pool of 32 tokens.
         self.event_proj = SlotPool(config, num_slots=32)
 
         self.config = config
 
     def forward(self, x, time_features=None):
-        # x: [b, 40, h, w, d] (assuming 16+8+16=40 frames)
+        # x: [b, 2*bnd_frames+seg_frames, h, w, d]
         t = x.size(1)
+        expected_frames = 2 * self.bnd_frames + self.seg_frames
+        if t != expected_frames:
+            raise ValueError(
+                f"RefProjector expected {expected_frames} frames "
+                f"({self.bnd_frames}+{self.seg_frames}+{self.bnd_frames}), got {t}"
+            )
         
         # Split
-        # Left: 16 frames
-        x_left = x[:, :16]
-        # Event: 8 frames
-        x_event = x[:, 16:24]
-        # Right: 16 frames
-        x_right = x[:, 24:]
+        event_start = self.bnd_frames
+        event_end = event_start + self.seg_frames
+        x_left = x[:, :event_start]
+        x_event = x[:, event_start:event_end]
+        x_right = x[:, event_end:]
         
         # Process Boundary
         # boundary_proj expects [b, t, ...] returns [b, t, s, d]
@@ -734,9 +744,9 @@ class RefProjector(nn.Module):
         out_event = self.event_proj(x_event) # [b, 32, d]
         
         if time_features is not None:
-            t_left = time_features[:, :16] # [b, 16, n_t, d]
-            t_event = time_features[:, 16:24] # [b, 8, n_t, d]
-            t_right = time_features[:, 24:] # [b, 16, n_t, d]
+            t_left = time_features[:, :event_start]
+            t_event = time_features[:, event_start:event_end]
+            t_right = time_features[:, event_end:]
             
             # Merge Left
             # out_left: [b, 16, 8, d], t_left: [b, 16, n_t, d]

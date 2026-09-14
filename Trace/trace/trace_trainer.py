@@ -298,38 +298,40 @@ def _unwrap_trace_model(model):
 
 
 class FrozenTrainableReference:
-    """Frozen policy that shares the actor's immutable backbone.
+    """Frozen policy evaluated through stateless parameter substitution.
 
-    TRACE freezes its backbone and trains only the multimodal projector,
-    embeddings, and output heads. Keeping a second complete 7B model solely
-    for reference logits exhausts a 40 GiB GPU. A stateless call substitutes
-    snapshots of just the trainable parameters while safely sharing every
-    parameter that cannot change.
+    An in-place reference snapshots only parameters that can change in the
+    current stage. A distinct teacher checkpoint may also have a fine-tuned
+    backbone, so its caller supplies the complete parameter state. Both cases
+    reuse the actor module structure and avoid constructing another module.
     """
 
     def __init__(self, model, state=None):
         self._actor = model
-        trainable = {
+        actor_parameters = {
             name: parameter
             for name, parameter in model.named_parameters()
-            if parameter.requires_grad
         }
         if state is None:
+            trainable = {
+                name: parameter
+                for name, parameter in actor_parameters.items()
+                if parameter.requires_grad
+            }
             self._state = {
                 name: parameter.detach().clone()
                 for name, parameter in trainable.items()
             }
         else:
-            missing = sorted(set(trainable) - set(state))
-            unexpected = sorted(set(state) - set(trainable))
-            if missing or unexpected:
+            unexpected = sorted(set(state) - set(actor_parameters))
+            if unexpected:
                 raise ValueError(
-                    "Frozen reference state does not match the actor's trainable parameters: "
-                    f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+                    "Frozen reference state contains parameters absent from the actor: "
+                    f"unexpected={unexpected[:5]}"
                 )
             self._state = {}
-            for name, parameter in trainable.items():
-                tensor = state[name]
+            for name, tensor in state.items():
+                parameter = actor_parameters[name]
                 if tuple(tensor.shape) != tuple(parameter.shape):
                     raise ValueError(
                         f"Frozen reference tensor shape mismatch for {name}: "
@@ -537,7 +539,10 @@ class TraceGRPOTrainer(TraceTrainer):
 
     def _reference_on_actor_device(self, actor_model):
         actor_device = next(_unwrap_trace_model(actor_model).parameters()).device
-        reference = _unwrap_trace_model(self.reference_model)
+        # Keep FrozenTrainableReference itself: unwrapping through its
+        # delegated ``module`` attribute would return the live actor and drop
+        # the frozen substituted weights.
+        reference = self.reference_model
         if next(reference.parameters()).device != actor_device:
             reference.to(actor_device)
         return reference

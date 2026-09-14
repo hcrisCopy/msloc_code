@@ -118,7 +118,7 @@ def load_class_feature_bank_from_file(feature_file_path: str):
 
     # ========== Load the feature file ==========
     try:
-        loaded_data = torch.load(feature_file_path, map_location='cpu')
+        loaded_data = torch.load(feature_file_path, map_location='cpu', weights_only=True)
     except Exception as e:
         raise RuntimeError(
             f"Failed to load class-feature file: {feature_file_path}\n"
@@ -151,6 +151,17 @@ def load_class_feature_bank_from_file(feature_file_path: str):
     pooling_method = loaded_data.get('pooling_method', 'CLS')
     normalized = loaded_data.get('normalized', True)
     
+    if not isinstance(class_features, torch.Tensor) or class_features.ndim != 2:
+        raise RuntimeError("Invalid class-feature file: class_features must be a 2-D tensor.")
+    if not isinstance(class_names, list) or not all(isinstance(name, str) for name in class_names):
+        raise RuntimeError("Invalid class-feature file: class_names must be a list of strings.")
+    if len(class_names) != class_features.shape[0] or num_classes != len(class_names):
+        raise RuntimeError(
+            "Invalid class-feature file: num_classes, class_names and class_features rows disagree."
+        )
+    if len(set(class_names)) != len(class_names):
+        raise RuntimeError("Invalid class-feature file: class_names contains duplicate entries.")
+
     # Validate feature dimension
     if class_features.shape[-1] != feat_dim:
         raise RuntimeError(
@@ -193,9 +204,28 @@ class TraceMetaModel:
 
         if getattr(config, 'closs', False):
             self.closs_tokens = nn.Parameter(torch.randn(3, config.hidden_size) * 1e-4)
-            # ClossProjector and ClassFeatureBank are constructed lazily by initialize_closs_modules.
-            self.closs_projector = None
-            self.class_feature_bank = None
+            # Fresh trace-uni weights have no class metadata, so these modules
+            # are created later from the external feature file. A trained
+            # checkpoint stores enough metadata to construct the same modules
+            # before from_pretrained restores their tensors.
+            class_names = list(getattr(config, 'closs_class_names', []) or [])
+            feature_dim = int(getattr(config, 'closs_feature_dim', 0) or 0)
+            if class_names and feature_dim > 0:
+                self.closs_projector = ClossProjector(
+                    llm_hidden_size=config.hidden_size,
+                    text_feat_size=feature_dim,
+                    hidden_size=1024,
+                )
+                self.class_feature_bank = ClassFeatureBank(
+                    torch.zeros(len(class_names), feature_dim), class_names
+                )
+                self.closs_head = nn.Linear(config.hidden_size, len(class_names), bias=False)
+                self.class_names = class_names
+                self.class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+            else:
+                self.closs_projector = None
+                self.class_feature_bank = None
+                self.closs_head = None
             # Learnable logit scale for CLoss (init to log(10) ~= 2.3)
             self.closs_logit_scale = nn.Parameter(torch.ones([]) * 2.3026)
 
@@ -383,23 +413,55 @@ class TraceMetaModel:
         print(f"Initializing CLoss modules from pre-computed features")
         print(f"{'='*60}")
 
-        self.class_feature_bank, text_feat_dim = load_class_feature_bank_from_file(feature_path)
+        loaded_feature_bank, text_feat_dim = load_class_feature_bank_from_file(feature_path)
+        class_names = loaded_feature_bank.class_names
 
-        class_names = self.class_feature_bank.class_names
-
-        self.closs_projector = ClossProjector(
-            llm_hidden_size=hidden_size,
-            text_feat_size=text_feat_dim,
-            hidden_size=1024
+        existing_names = list(getattr(self, 'class_names', []) or [])
+        existing_bank = getattr(self, 'class_feature_bank', None)
+        existing_projector = getattr(self, 'closs_projector', None)
+        existing_head = getattr(self, 'closs_head', None)
+        restored_from_checkpoint = (
+            existing_names
+            and existing_names == class_names
+            and existing_bank is not None
+            and tuple(existing_bank.class_features.shape) == tuple(loaded_feature_bank.class_features.shape)
+            and existing_projector is not None
+            and existing_head is not None
+            and existing_head.out_features == len(class_names)
         )
-        
-        # Linear classification head: project hidden_states directly to class logits.
-        self.closs_head = nn.Linear(hidden_size, len(class_names), bias=False)
-        nn.init.normal_(self.closs_head.weight, std=0.02)
+
+        if existing_names and existing_names != class_names:
+            raise RuntimeError(
+                "Class names in --class_feature_path do not match the SFT checkpoint config. "
+                "Use the same class_features_bge.pt throughout SFT, OPD and GRPO."
+            )
+
+        if not restored_from_checkpoint:
+            self.class_feature_bank = loaded_feature_bank
+            self.closs_projector = ClossProjector(
+                llm_hidden_size=hidden_size,
+                text_feat_size=text_feat_dim,
+                hidden_size=1024
+            )
+            # Three anomaly-aware token states share this category classifier.
+            self.closs_head = nn.Linear(hidden_size, len(class_names), bias=False)
+            nn.init.normal_(self.closs_head.weight, std=0.02)
+        elif not torch.allclose(
+                existing_bank.class_features.detach().float().cpu(),
+                loaded_feature_bank.class_features.detach().float().cpu(),
+                rtol=5e-3,
+                atol=5e-3):
+            # Do not silently pair a learned classifier with another class bank.
+            raise RuntimeError(
+                "Class features in --class_feature_path differ from those stored in the checkpoint."
+            )
         
         # Save class info.
         self.class_names = class_names
         self.class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+        self.config.closs_class_names = class_names
+        self.config.closs_class_to_idx = self.class_to_idx
+        self.config.closs_feature_dim = text_feat_dim
         
         print(f"\n{'='*60}")
         print(f"CLoss modules initialized successfully!")
