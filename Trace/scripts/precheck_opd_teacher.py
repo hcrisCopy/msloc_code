@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Validate a frozen TRACE checkpoint as a paired-video OPD teacher.
+"""Compare frozen Student/Teacher SFT checkpoints and build the OPD gate.
 
-This program deliberately performs no optimization.  For every *actual*
-stage-1 training proposal it runs the same frozen SFT checkpoint twice:
-
-1. candidate proposal only (the deployment/student view), and
-2. vertically paired real-reference/candidate video (the teacher view).
+This program deliberately performs no optimization. For every actual stage-1
+proposal it compares the separately SFT-trained student (candidate only) with
+the separately SFT-trained teacher (aligned real reference above, candidate
+below). Only examples on which the teacher is strictly better are exported for
+OPD.
 
 The resulting JSON is both an auditable report and the immutable reliability
-cache consumed by OPD.  A paired teacher is eligible only when it localizes a
-positive proposal with sufficient IoU or correctly produces the canonical
-no-forgery stream for a negative proposal.
+cache consumed by OPD. A record is exported only when the paired teacher fixes
+the student's fake/no-forgery decision, or, when both detect a positive event,
+has strictly higher localization IoU. There is no minimum IoU or gain margin.
 """
 
 from __future__ import annotations
@@ -128,6 +128,9 @@ def _summary(records: Iterable[Mapping[str, Any]], key: str, iou_gate: float) ->
     def fraction(items, predicate):
         return sum(bool(predicate(item)) for item in items) / len(items) if items else 0.0
 
+    positive_binary_correct = sum(status(row) == VALID_EVENT for row in positives)
+    positive_localized_correct = sum(row[key]["matched_iou"] >= iou_gate for row in positives)
+    negative_correct = sum(status(row) == VALID_NO_EVENT for row in negatives)
     return {
         "proposals": len(rows),
         "positive_proposals": len(positives),
@@ -142,6 +145,10 @@ def _summary(records: Iterable[Mapping[str, Any]], key: str, iou_gate: float) ->
         "negative_no_event_rate": fraction(negatives, lambda row: status(row) == VALID_NO_EVENT),
         "negative_false_event_rate": fraction(negatives, lambda row: status(row) == VALID_EVENT),
         "format_failure_rate": fraction(rows, lambda row: status(row) not in {VALID_EVENT, VALID_NO_EVENT}),
+        "binary_accuracy": (positive_binary_correct + negative_correct) / len(rows) if rows else 0.0,
+        "joint_binary_localization_accuracy": (
+            (positive_localized_correct + negative_correct) / len(rows) if rows else 0.0
+        ),
     }
 
 
@@ -149,9 +156,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--replay", required=True, help="Normalized replay from build_opd_grpo_replay.py")
     parser.add_argument("--data-folder", required=True, help="Root that contains candidate and reference video paths")
-    parser.add_argument("--model-path", required=True, help="Frozen teacher checkpoint; candidate-SFT on the first attempt, paired-SFT after fallback")
+    parser.add_argument("--student-model-path", required=True, help="Frozen candidate-only student SFT checkpoint")
+    parser.add_argument("--model-path", required=True, help="Frozen paired-input teacher SFT checkpoint")
     parser.add_argument("--vision-tower", required=True)
     parser.add_argument("--output", required=True, help="Output teacher precheck/cache JSON")
+    parser.add_argument("--selected-output", required=True, help="Filtered replay containing only teacher-better records")
     parser.add_argument("--prompt-file", default=str(ROOT / "trace" / "prompts" / "dvc.txt"))
     parser.add_argument("--gpu-id", default="0")
     parser.add_argument("--version", default="v1_mistral", help="Must match --version used for SFT/OPD training")
@@ -159,12 +168,9 @@ def main() -> None:
     parser.add_argument("--bnd-frames", type=int, default=16)
     parser.add_argument("--seg-frames", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int, default=128)
-    parser.add_argument("--teacher-iou-gate", type=float, default=0.3)
+    parser.add_argument("--teacher-iou-gate", type=float, default=0.3, help="Reporting threshold only; it does not filter teacher-better samples")
     parser.add_argument("--max-samples", type=int, default=0, help="Positive value runs only this many records for a smoke test")
-    parser.add_argument("--enforce-pair-benefit", action="store_true", help="Exit nonzero unless paired input improves positive localization without excessive negative degradation")
-    parser.add_argument("--minimum-recovery-improvement", type=float, default=0.0)
-    parser.add_argument("--maximum-negative-noevent-drop", type=float, default=0.02)
-    parser.add_argument("--minimum-reliable-positive-rate", type=float, default=0.05)
+    parser.add_argument("--enforce-pair-benefit", action="store_true", help="Exit nonzero when no proposal has a strictly better teacher refinement")
     parser.add_argument("--resume", action="store_true", help="Resume from per-rank proposal progress saved beside --output")
     parser.add_argument("--clean", action="store_true", help="Remove an old report and its progress before starting")
     args = parser.parse_args()
@@ -189,6 +195,7 @@ def main() -> None:
     progress_manifest = progress_dir / "run.json"
     run_identity = {
         "replay_path": str(Path(args.replay).resolve()),
+        "student_model_path": str(Path(args.student_model_path).resolve()),
         "teacher_model_path": str(Path(args.model_path).resolve()),
         "vision_tower": str(Path(args.vision_tower).resolve()),
         "version": args.version,
@@ -198,9 +205,6 @@ def main() -> None:
         "max_new_tokens": args.max_new_tokens,
         "teacher_iou_gate": args.teacher_iou_gate,
         "max_samples": args.max_samples,
-        "minimum_recovery_improvement": args.minimum_recovery_improvement,
-        "minimum_reliable_positive_rate": args.minimum_reliable_positive_rate,
-        "maximum_negative_noevent_drop": args.maximum_negative_noevent_drop,
     }
     setup_error = None
     if rank == 0:
@@ -208,10 +212,17 @@ def main() -> None:
             if args.clean:
                 if output.is_file():
                     output.unlink()
+                selected_output = Path(args.selected_output)
+                if selected_output.is_file():
+                    selected_output.unlink()
                 if progress_dir.is_dir():
                     shutil.rmtree(progress_dir)
             if output.exists() and not args.resume:
                 raise FileExistsError(f"{output} already exists; pass --clean to replace it or --resume to reuse it")
+            if Path(args.selected_output).exists() and not args.resume:
+                raise FileExistsError(
+                    f"{args.selected_output} already exists; pass --clean to replace it or --resume to reuse it"
+                )
             if args.resume:
                 if not progress_manifest.is_file():
                     raise FileNotFoundError("Precheck resume metadata is missing; use --clean to start a new run")
@@ -219,6 +230,10 @@ def main() -> None:
                 if previous_identity != run_identity:
                     raise ValueError("Precheck progress belongs to different inputs or parameters; use --clean")
             if args.resume and output.is_file():
+                if not Path(args.selected_output).is_file():
+                    raise FileNotFoundError(
+                        "Precheck report exists but selected replay is missing; use --clean to rebuild both"
+                    )
                 print(f"Precheck is already complete: {output}")
             else:
                 if progress_dir.exists() and not args.resume:
@@ -241,10 +256,9 @@ def main() -> None:
             dist.destroy_process_group()
         return
 
-    if not args.model_path:
-        parser.error("--model-path is empty; run 'source Trace/scripts/setup_opd_grpo_env.sh' or set SFT_CKPT")
-    if not Path(args.model_path).is_dir():
-        parser.error(f"--model-path is not a checkpoint directory: {args.model_path}")
+    for role, checkpoint in (("student", args.student_model_path), ("teacher", args.model_path)):
+        if not Path(checkpoint).is_dir():
+            parser.error(f"--{role}-model-path is not a checkpoint directory: {checkpoint}")
 
     if not 0.0 <= args.teacher_iou_gate <= 1.0:
         raise ValueError("--teacher-iou-gate must be in [0, 1]")
@@ -284,20 +298,32 @@ def main() -> None:
     remaining_records = [record for record in source_records if record["id"] not in completed]
     source_records = remaining_records[rank::world_size]
     device = torch.device(f"cuda:{local_rank}")
-    model_name = get_model_name_from_path(args.model_path)
-    tokenizer, model, processor, _ = load_pretrained_model(
-        args.model_path,
+    student_name = get_model_name_from_path(args.student_model_path)
+    tokenizer, student_model, processor, _ = load_pretrained_model(
+        args.student_model_path,
         None,
-        model_name,
+        student_name,
         vision_tower=args.vision_tower,
         device_map=None,
         device=str(device),
     )
-    model = model.to(device=device, dtype=torch.float16).eval()
+    student_model = student_model.to(device=device, dtype=torch.float16).eval()
+    teacher_name = get_model_name_from_path(args.model_path)
+    teacher_tokenizer, teacher_model, teacher_processor, _ = load_pretrained_model(
+        args.model_path,
+        None,
+        teacher_name,
+        vision_tower=args.vision_tower,
+        device_map=None,
+        device=str(device),
+    )
+    teacher_model = teacher_model.to(device=device, dtype=torch.float16).eval()
+    if teacher_tokenizer.vocab_size != tokenizer.vocab_size:
+        raise ValueError("Student and teacher tokenizers have different vocabularies")
     spec = TraceTokenSpec(
-        text_vocab_size=model.vocab_size,
-        time_vocab=model.get_model().time_tokenizer.vocab,
-        score_vocab_size=model.config.score_vocab_size,
+        text_vocab_size=teacher_model.vocab_size,
+        time_vocab=teacher_model.get_model().time_tokenizer.vocab,
+        score_vocab_size=teacher_model.config.score_vocab_size,
     )
     base_instruction = Path(args.prompt_file).read_text(encoding="utf-8").strip()
     candidate_prompt = _prompt(tokenizer, base_instruction, args.version)
@@ -315,19 +341,19 @@ def main() -> None:
         start, end = float(proposal[0]), float(proposal[1])
         candidate_file = _video_path(args.data_folder, record["candidate_video"])
         candidate_video, timestamps = process_video_ref_split(
-            candidate_file, processor, model.config.image_aspect_ratio,
+            candidate_file, processor, student_model.config.image_aspect_ratio,
             bnd_frames=args.bnd_frames, seg_frames=args.seg_frames, bnd_ratio=args.bnd_ratio,
             start_time=start, end_time=end,
         )
         duration = end - start
         target_segments = _targets(record)
 
-        candidate_ids = _generate(model, tokenizer, candidate_prompt, candidate_video, timestamps, args.max_new_tokens)
+        student_ids = _generate(student_model, tokenizer, candidate_prompt, candidate_video, timestamps, args.max_new_tokens)
         reference = record["reference"]
         reference_file = _video_path(args.data_folder, reference["reference_video"])
         ref_start, ref_end = map(float, reference["reference_segment"])
         reference_video, _ = process_video_ref_split(
-            reference_file, processor, model.config.image_aspect_ratio,
+            reference_file, teacher_processor, teacher_model.config.image_aspect_ratio,
             bnd_frames=args.bnd_frames, seg_frames=args.seg_frames, bnd_ratio=args.bnd_ratio,
             start_time=ref_start, end_time=ref_end,
         )
@@ -335,30 +361,40 @@ def main() -> None:
             paired_video = make_vertical_reference_pair(reference_video, candidate_video)
         except ValueError as exc:
             raise RuntimeError(f"{record['id']}: cannot construct vertical pair: {exc}") from exc
-        teacher_ids = _generate(model, tokenizer, teacher_prompt, paired_video, timestamps, args.max_new_tokens)
+        teacher_ids = _generate(teacher_model, teacher_tokenizer, teacher_prompt, paired_video, timestamps, args.max_new_tokens)
         teacher_input_mode = "paired_reference"
-        candidate_parsed = parse_trace_tokens(candidate_ids, spec, lambda ids: _safe_decode(tokenizer, ids), window_duration=duration)
-        teacher_parsed = parse_trace_tokens(teacher_ids, spec, lambda ids: _safe_decode(tokenizer, ids), window_duration=duration)
-        candidate_iou = _max_iou(candidate_parsed, target_segments)
+        student_parsed = parse_trace_tokens(student_ids, spec, lambda ids: _safe_decode(tokenizer, ids), window_duration=duration)
+        teacher_parsed = parse_trace_tokens(teacher_ids, spec, lambda ids: _safe_decode(teacher_tokenizer, ids), window_duration=duration)
+        student_iou = _max_iou(student_parsed, target_segments)
         teacher_iou = _max_iou(teacher_parsed, target_segments)
         positive = bool(target_segments)
-        reliable = (
-            teacher_parsed.status == VALID_EVENT and teacher_iou >= args.teacher_iou_gate
-            if positive else teacher_parsed.status == VALID_NO_EVENT
-        )
+        if positive:
+            student_detected_fake = student_parsed.status == VALID_EVENT
+            teacher_detected_fake = teacher_parsed.status == VALID_EVENT
+            teacher_better = teacher_detected_fake and (
+                not student_detected_fake or teacher_iou > student_iou
+            )
+            selection_reason = "positive_binary_correction" if teacher_detected_fake and not student_detected_fake else "positive_iou_gain"
+        else:
+            student_correct = student_parsed.status == VALID_NO_EVENT
+            teacher_better = teacher_parsed.status == VALID_NO_EVENT and not student_correct
+            selection_reason = "negative_false_event_correction"
+        reliable = teacher_better
         checked_row = {
             "id": record["id"],
             "proposal": [start, end],
             "replay_bucket": record.get("replay_bucket"),
             "is_positive": positive,
-            "candidate_only": {"parsed": candidate_parsed.as_dict(), "matched_iou": candidate_iou},
+            "student_candidate": {"parsed": student_parsed.as_dict(), "matched_iou": student_iou},
             "paired_teacher": {"parsed": teacher_parsed.as_dict(), "matched_iou": teacher_iou},
             "teacher_input_mode": teacher_input_mode,
             "teacher_reliable": reliable,
+            "teacher_better": teacher_better,
+            "selection_reason": selection_reason if teacher_better else "not_strictly_better",
         }
         checked.append(checked_row)
         progress_handle.write(json.dumps(checked_row, ensure_ascii=False) + "\n")
-        iterator.set_postfix(candidate=candidate_parsed.status, pair=teacher_parsed.status, reliable=reliable)
+        iterator.set_postfix(student=student_parsed.status, teacher=teacher_parsed.status, selected=teacher_better)
     progress_handle.close()
 
     if distributed:
@@ -374,7 +410,7 @@ def main() -> None:
     if len(checked) != len(source_order):
         raise RuntimeError(f"Precheck completed {len(checked)}/{len(source_order)} proposals; report not written")
 
-    candidate_metrics = _summary(checked, "candidate_only", args.teacher_iou_gate)
+    candidate_metrics = _summary(checked, "student_candidate", args.teacher_iou_gate)
     teacher_metrics = _summary(checked, "paired_teacher", args.teacher_iou_gate)
     recovery_gain = teacher_metrics["positive_localized_rate"] - candidate_metrics["positive_localized_rate"]
     negative_drop = candidate_metrics["negative_no_event_rate"] - teacher_metrics["negative_no_event_rate"]
@@ -382,21 +418,26 @@ def main() -> None:
         sum(row["teacher_reliable"] for row in checked if row["is_positive"])
         / max(1, sum(row["is_positive"] for row in checked))
     )
-    pair_benefit_passed = (
-        recovery_gain >= args.minimum_recovery_improvement
-        and negative_drop <= args.maximum_negative_noevent_drop
-        and reliable_positive_rate >= args.minimum_reliable_positive_rate
+    binary_accuracy_gain = (
+        teacher_metrics["binary_accuracy"] - candidate_metrics["binary_accuracy"]
     )
+    joint_accuracy_gain = (
+        teacher_metrics["joint_binary_localization_accuracy"]
+        - candidate_metrics["joint_binary_localization_accuracy"]
+    )
+    selected_ids = {row["id"] for row in checked if row["teacher_better"]}
+    selected_records = [record for record in replay["records"] if record["id"] in selected_ids]
+    pair_benefit_passed = bool(selected_records)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "purpose": "frozen paired-input teacher validation and OPD reliability cache",
-        "replay_path": str(Path(args.replay).resolve()),
-        "teacher_model_path": str(Path(args.model_path).resolve()),
+        "replay_path": args.replay,
+        "student_model_path": args.student_model_path,
+        "teacher_model_path": args.model_path,
+        "selected_replay_path": args.selected_output,
         "config": {
             "teacher_iou_gate": args.teacher_iou_gate,
-            "minimum_recovery_improvement": args.minimum_recovery_improvement,
-            "minimum_reliable_positive_rate": args.minimum_reliable_positive_rate,
-            "maximum_negative_noevent_drop": args.maximum_negative_noevent_drop,
+            "selection_rule": "binary_correction_or_strict_positive_iou_improvement",
             "bnd_ratio": args.bnd_ratio,
             "bnd_frames": args.bnd_frames,
             "seg_frames": args.seg_frames,
@@ -404,12 +445,16 @@ def main() -> None:
             "conversation_version": args.version,
             "pair_prompt": PAIR_REFERENCE_INSTRUCTION,
         },
+        "student_candidate_metrics": candidate_metrics,
         "candidate_only_metrics": candidate_metrics,
         "paired_teacher_metrics": teacher_metrics,
         "teacher_reliable_proposals": sum(row["teacher_reliable"] for row in checked),
         "teacher_reliable_positive_rate": reliable_positive_rate,
         "localized_rate_gain": recovery_gain,
+        "binary_accuracy_gain": binary_accuracy_gain,
+        "joint_binary_localization_accuracy_gain": joint_accuracy_gain,
         "negative_noevent_drop": negative_drop,
+        "teacher_better_proposals": len(selected_records),
         "pair_benefit_passed": pair_benefit_passed,
         "records": checked,
     }
@@ -417,15 +462,31 @@ def main() -> None:
     temporary_output = output.with_suffix(output.suffix + ".tmp")
     temporary_output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary_output.replace(output)
-    print(json.dumps({"candidate_only": candidate_metrics, "paired_teacher": teacher_metrics, "cache": str(output)}, ensure_ascii=False, indent=2))
+    selected_payload = {
+        "schema_version": replay.get("schema_version", 2),
+        "paired_only": True,
+        "selection": "strict_teacher_better_v2",
+        "source_replay": args.replay,
+        "teacher_check_result": args.output,
+        "records": selected_records,
+        "statistics": {
+            "records": len(selected_records),
+            "positive": sum(bool(row.get("is_positive")) for row in selected_records),
+            "negative": sum(not bool(row.get("is_positive")) for row in selected_records),
+        },
+    }
+    selected_path = Path(args.selected_output)
+    selected_path.parent.mkdir(parents=True, exist_ok=True)
+    selected_tmp = selected_path.with_suffix(selected_path.suffix + ".tmp")
+    selected_tmp.write_text(json.dumps(selected_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    selected_tmp.replace(selected_path)
+    print(json.dumps({"student_candidate": candidate_metrics, "paired_teacher": teacher_metrics, "cache": str(output)}, ensure_ascii=False, indent=2))
 
     if args.enforce_pair_benefit:
         if not pair_benefit_passed:
             raise SystemExit(
                 "Paired frozen teacher did not pass the precheck: "
-                f"localized-rate gain={recovery_gain:.4f} (required >= {args.minimum_recovery_improvement:.4f}), "
-                f"reliable-positive rate={reliable_positive_rate:.4f} (required >= {args.minimum_reliable_positive_rate:.4f}), "
-                f"negative no-event drop={negative_drop:.4f} (allowed <= {args.maximum_negative_noevent_drop:.4f}). "
+                f"selected records={len(selected_records)} (required > 0). "
                 f"Report was still written to {output}; do not start OPD."
             )
     if distributed:

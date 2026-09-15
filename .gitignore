@@ -13,3 +13,4 @@ __pycache__/
 /Trace/output/
 /Trace/inference_results/
 /Trace/checkpoints/
+tmp/

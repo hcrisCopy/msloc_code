@@ -163,12 +163,23 @@ class OpdGrpoTests(unittest.TestCase):
             object_caption="The mouth flickers and changes shape unnaturally.",
             object_class="Object Flickering/Instantaneous Changes",
         )
-        judge = text_reward.ReferenceTextExplanationJudge(mode="lexical")
+        class FakeNLI:
+            def probabilities(self, pairs):
+                results = []
+                for fact, claim in pairs:
+                    aligned = "mouth" in fact.lower() and "mouth" in claim.lower() and "flicker" in claim.lower()
+                    results.append((0.95, 0.01) if aligned else (0.02, 0.05))
+                return results
+
+        judge = text_reward.EntailmentExplanationJudge.__new__(text_reward.EntailmentExplanationJudge)
+        judge.max_words = 80
+        judge.require_candidate_observable = False
+        judge.nli = FakeNLI()
         matched = judge.score(caption="The mouth flickers with unnatural shape changes.", evidence=evidence)
         generic = judge.score(caption="The video is fake.", evidence=evidence)
         self.assertGreater(matched.graph_f1, generic.graph_f1)
         self.assertGreater(matched.reward, generic.reward)
-        self.assertEqual(generic.generic_penalty, 1.0)
+        self.assertLess(generic.graph_precision, matched.graph_precision)
 
     def test_text_reward_uses_object_and_boundary_facts(self):
         evidence = opd.EvidenceCard(
@@ -193,7 +204,7 @@ class OpdGrpoTests(unittest.TestCase):
             "--proposals", "proposals.json", "--base-model", "trace-uni",
         ]
         parser = launcher.build_parser()
-        for command in ("sft", "student-sft", "teacher-sft"):
+        for command in ("sft", "student-sft"):
             args = parser.parse_args([command, *common])
             self.assertIs(args.handler, launcher.run_sft)
             self.assertEqual(args.mm_projector_type, "ref_projector")

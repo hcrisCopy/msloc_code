@@ -1,11 +1,11 @@
-"""Fast reference-grounded reward for forensic explanations.
+"""Frozen, relation-aware entailment reward for forensic explanations.
 
-The scorer follows the reference-side structure of SPICE rather than asking a
-generative VLM to judge every rollout.  TASLE annotations already separate the
-object/anomaly, onset and offset evidence, so they act as a small per-example
-evidence graph.  The default lexical mode needs no additional model.  Optional
-NLI mode uses a frozen sequence-classification model to accept paraphrases and
-penalise contradictions; it is never trained inside GRPO.
+TASLE annotations already separate object/anomaly, onset and offset evidence.
+We therefore score atomic generated claims against those per-example facts
+with a frozen NLI cross-encoder.  There is deliberately no hand-written
+artifact dictionary and no lexical-overlap fallback: synonyms and
+contradictions are decided by the frozen model, while one-to-one matching
+prevents repeating one correct phrase from covering every evidence fact.
 """
 
 from __future__ import annotations
@@ -18,55 +18,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 _WORD_RE = re.compile(r"[a-z0-9]+(?:[-'][a-z0-9]+)?", re.IGNORECASE)
 _CLAUSE_RE = re.compile(r"[.!?;]+|\b(?:while|whereas|however)\b", re.IGNORECASE)
-_GENERIC = {
-    "the video is fake", "the video appears fake", "there is a forgery",
-    "there are inconsistencies", "the content is manipulated",
-    "the video contains anomalies", "an anomaly is visible",
-}
-_STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
-    "for", "from", "has", "have", "in", "into", "is", "it", "its", "of",
-    "on", "or", "that", "the", "their", "there", "this", "to", "was",
-    "were", "with", "within", "video", "frames", "frame", "appears",
-    "showing", "shows", "suggesting", "indicating", "visible",
-}
-_CANONICAL = {
-    "flickers": "flicker", "flickering": "flicker", "flickered": "flicker",
-    "disappears": "disappear", "disappeared": "disappear",
-    "appearing": "appear", "appeared": "appear",
-    "deformed": "deform", "deformation": "deform", "deformations": "deform",
-    "distorted": "distort", "distortion": "distort", "distortions": "distort",
-    "inconsistent": "inconsistency", "inconsistencies": "inconsistency",
-    "unnatural": "anomaly", "anomalous": "anomaly", "abnormal": "anomaly",
-    "abruptly": "abrupt", "suddenly": "abrupt", "sudden": "abrupt",
-    "movements": "movement", "moving": "movement", "motion": "movement",
-    "textures": "texture", "boundaries": "boundary", "edges": "edge",
-    "objects": "object", "persons": "person", "people": "person",
-}
-
-
-def _normalise(text: str) -> str:
-    return " ".join(_WORD_RE.findall(str(text).lower()))
-
-
 def _tokens(text: str) -> List[str]:
-    tokens = []
-    for token in _WORD_RE.findall(str(text).lower()):
-        token = _CANONICAL.get(token, token)
-        if token not in _STOPWORDS and len(token) > 1:
-            tokens.append(token)
-    return tokens
-
-
-def _token_f1(left: str, right: str) -> float:
-    a, b = set(_tokens(left)), set(_tokens(right))
-    if not a or not b:
-        return 0.0
-    overlap = len(a & b)
-    if not overlap:
-        return 0.0
-    precision, recall = overlap / len(a), overlap / len(b)
-    return 2.0 * precision * recall / (precision + recall)
+    return _WORD_RE.findall(str(text).lower())
 
 
 def _split_claims(text: str) -> List[str]:
@@ -86,6 +39,34 @@ def _repetition_penalty(text: str) -> float:
     if not bigrams:
         return 0.0
     return max(0.0, 1.0 - len(set(bigrams)) / len(bigrams))
+
+
+def _maximum_weight_matching(matrix: Sequence[Sequence[float]]) -> List[Tuple[int, int, float]]:
+    """Exact claim/fact assignment by dynamic programming over fact masks.
+
+    TASLE has at most three fact slots, so O(claims * 2^facts * facts) is both
+    exact and cheaper than adding a SciPy dependency to every GRPO rank.
+    """
+    if not matrix or not matrix[0]:
+        return []
+    fact_count = len(matrix[0])
+    states: Dict[int, Tuple[float, List[Tuple[int, int, float]]]] = {0: (0.0, [])}
+    for claim_index, row in enumerate(matrix):
+        next_states = dict(states)  # leaving this claim unmatched is allowed
+        for mask, (score, pairs) in states.items():
+            for fact_index in range(fact_count):
+                bit = 1 << fact_index
+                if mask & bit:
+                    continue
+                candidate = score + float(row[fact_index])
+                new_mask = mask | bit
+                if new_mask not in next_states or candidate > next_states[new_mask][0]:
+                    next_states[new_mask] = (
+                        candidate,
+                        [*pairs, (claim_index, fact_index, float(row[fact_index]))],
+                    )
+        states = next_states
+    return max(states.values(), key=lambda item: item[0])[1]
 
 
 @dataclass(frozen=True)
@@ -175,28 +156,21 @@ class FrozenNLIScorer:
         return results
 
 
-class ReferenceTextExplanationJudge:
-    """SPICE-style evidence matching with optional frozen NLI soft matching."""
+class EntailmentExplanationJudge:
+    """Atomic evidence coverage/precision using only a frozen NLI model."""
 
     def __init__(
         self,
         *,
-        mode: str = "lexical",
-        nli_model_path: Optional[str] = None,
+        nli_model_path: str,
         nli_device: str = "cpu",
         nli_batch_size: int = 32,
         max_words: int = 80,
         require_candidate_observable: bool = False,
     ):
-        if mode not in {"lexical", "nli"}:
-            raise ValueError("text explanation scorer mode must be lexical or nli")
-        self.mode = mode
         self.max_words = max(8, int(max_words))
         self.require_candidate_observable = bool(require_candidate_observable)
-        self.nli = (
-            FrozenNLIScorer(nli_model_path or "", nli_device, nli_batch_size)
-            if mode == "nli" else None
-        )
+        self.nli = FrozenNLIScorer(nli_model_path, nli_device, nli_batch_size)
 
     @staticmethod
     def _weighted_f1(precision: float, recall: float) -> float:
@@ -212,52 +186,39 @@ class ReferenceTextExplanationJudge:
             return TextExplanationVerdict(
                 0.0, 0.0, 0.0, 0.0, 1.0 if caption else 0.0,
                 _repetition_penalty(caption), 0.0, -1.0,
-                f"reference-text-{self.mode}-v1",
+                "atomic-entailment-v2",
             )
 
-        lexical = [[_token_f1(claim, fact.matching_text) for fact in facts] for claim in claims]
-        match = [row[:] for row in lexical]
-        contradiction = 0.0
-        recall_scores = [max(lexical[row][col] for row in range(len(claims))) for col in range(len(facts))]
-        if self.nli is not None:
-            precision_pairs = [(fact.matching_text, claim) for claim in claims for fact in facts]
-            recall_pairs = [(caption, fact.matching_text) for fact in facts]
-            pairs = precision_pairs + recall_pairs
-            probabilities = self.nli.probabilities(pairs)
-            contradiction_matrix = [[0.0 for _ in facts] for _ in claims]
-            cursor = 0
-            for claim_index in range(len(claims)):
-                for fact_index in range(len(facts)):
-                    entailment, contra = probabilities[cursor]
-                    cursor += 1
-                    match[claim_index][fact_index] = max(match[claim_index][fact_index], entailment)
-                    contradiction_matrix[claim_index][fact_index] = contra
+        pairs = [(fact.matching_text, claim) for claim in claims for fact in facts]
+        probabilities = self.nli.probabilities(pairs)
+        match = [[0.0 for _ in facts] for _ in claims]
+        contradiction_matrix = [[0.0 for _ in facts] for _ in claims]
+        cursor = 0
+        for claim_index in range(len(claims)):
             for fact_index in range(len(facts)):
-                entailment, _ = probabilities[cursor]
+                entailment, contradiction_probability = probabilities[cursor]
+                match[claim_index][fact_index] = entailment
+                contradiction_matrix[claim_index][fact_index] = contradiction_probability
                 cursor += 1
-                recall_scores[fact_index] = max(recall_scores[fact_index], entailment)
-            aligned_contradictions = []
-            for claim_index, row in enumerate(match):
-                best_fact = max(range(len(row)), key=row.__getitem__)
-                aligned_contradictions.append(contradiction_matrix[claim_index][best_fact])
-            contradiction = max(aligned_contradictions, default=0.0)
 
-        precision = sum(max(row) for row in match) / len(claims)
+        # Exact one-to-one matching prevents a repeated phrase from covering
+        # all relations. Unmatched claims lower precision and unmatched facts
+        # lower recall.
+        aligned = _maximum_weight_matching(match)
+
+        precision = sum(score for _, _, score in aligned) / len(claims)
         total_weight = sum(fact.weight for fact in facts)
-        recall = sum(
-            fact.weight * recall_scores[fact_index]
-            for fact_index, fact in enumerate(facts)
-        ) / total_weight
+        aligned_by_fact = {fact_index: score for _, fact_index, score in aligned}
+        recall = sum(fact.weight * aligned_by_fact.get(fact_index, 0.0) for fact_index, fact in enumerate(facts)) / total_weight
         graph_f1 = self._weighted_f1(precision, recall)
+        contradiction = sum(max(row, default=0.0) for row in contradiction_matrix) / len(claims)
 
-        normalised = _normalise(caption)
-        generic = 1.0 if normalised in _GENERIC or len(_tokens(caption)) < 4 else 0.0
         repetition = _repetition_penalty(caption)
         word_count = len(_WORD_RE.findall(caption))
         length = min(1.0, max(0, word_count - self.max_words) / self.max_words)
         reward = (
-            0.50 * recall + 0.50 * precision
-            - 0.50 * contradiction - 0.20 * generic
+            0.55 * recall + 0.45 * precision
+            - 0.50 * contradiction
             - 0.10 * repetition - 0.10 * length
         )
         reward = max(-1.0, min(1.0, reward))
@@ -266,9 +227,19 @@ class ReferenceTextExplanationJudge:
             graph_recall=recall,
             graph_f1=graph_f1,
             contradiction=contradiction,
-            generic_penalty=generic,
+            generic_penalty=0.0,
             repetition_penalty=repetition,
             length_penalty=length,
             reward=reward,
-            judge_id=f"reference-text-{self.mode}-v1",
+            judge_id="atomic-entailment-v2",
         )
+
+
+# Import compatibility for older experiment code.  The old lexical/NLI mode
+# selector is intentionally rejected so a resumed run cannot silently switch
+# back to the hand-written dictionary reward.
+class ReferenceTextExplanationJudge(EntailmentExplanationJudge):
+    def __init__(self, *, mode: str = "entailment", **kwargs):
+        if mode != "entailment":
+            raise ValueError("Only mode='entailment' is supported; lexical/NLI-v1 rewards were retired")
+        super().__init__(**kwargs)

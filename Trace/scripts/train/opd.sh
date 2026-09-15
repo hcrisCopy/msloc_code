@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Candidate-only student OPD with a frozen, paired-input teacher.  The teacher
-# is the SFT checkpoint itself viewed through a real-reference/candidate pair;
-# it is never fine-tuned.  Run precheck_opd_teacher.py first.
+# is independently SFT-trained from the shared base and is never updated during
+# OPD. Run precheck_opd_teacher.py first and use its selected replay.
 set -euo pipefail
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
@@ -12,6 +12,7 @@ MSLOC_ASSETS=${MSLOC_ASSETS:-"$(cd "$MSLOC_ROOT/../MSLoc_data" && pwd)"}
 DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 REPLAY_PATH=${REPLAY_PATH:?Set REPLAY_PATH to normalized replay JSON with real references}
 STUDENT_CKPT=${STUDENT_CKPT:?Set STUDENT_CKPT to the ref2-SFT checkpoint}
+TEACHER_CKPT=${TEACHER_CKPT:?Set TEACHER_CKPT to the independently trained paired teacher checkpoint}
 TEACHER_CACHE=${TEACHER_CACHE:?Set TEACHER_CACHE to the JSON produced by precheck_opd_teacher.py}
 OUT_DIR=${OUT_DIR:-"$MSLOC_ASSETS/Trace/output/opd_student"}
 REPORT_TO=${REPORT_TO:-none}
@@ -39,7 +40,7 @@ torchrun --standalone --nproc_per_node=${NPROC_PER_NODE:-8} "$TRACE_DIR/trace/tr
   --deepspeed "$DEEPSPEED_CONFIG" \
   --version v1_mistral --vision_tower "$MSLOC_ASSETS/Trace/ckpts/clip-vit-large-patch14-336" \
   --mm_projector_type spatial_slot --tune_mm_mlp_adapter True --tune_mm_embed_head True --tune_lm_embed_head True \
-  --model_name_or_path "$STUDENT_CKPT" --opd_teacher_model_path "$STUDENT_CKPT" \
+  --model_name_or_path "$STUDENT_CKPT" --opd_teacher_model_path "$TEACHER_CKPT" \
   --data_path "$DATA_ROOT/annos/train_all_1209.json" --data_folder "$DATA_ROOT/videos" \
   --train_mode ref2 --replay_path "$REPLAY_PATH" --opd_teacher_cache_path "$TEACHER_CACHE" --replay_balance none --second_stage opd \
   "${MAX_SAMPLE_ARGS[@]}" \

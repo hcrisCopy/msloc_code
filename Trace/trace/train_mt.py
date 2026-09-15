@@ -220,8 +220,8 @@ class TrainingArguments(transformers.TrainingArguments):
     grpo_explanation_iou_gate: float = field(default=0.3)
     grpo_boundary_tolerance: float = field(default=1.0)
     grpo_structure_aware: bool = field(default=True)
-    grpo_text_reward_mode: str = field(default="lexical", metadata={"help": "Reference-text explanation scorer: lexical or nli."})
-    grpo_text_nli_model_path: Optional[str] = field(default=None, metadata={"help": "Local frozen NLI model directory; required only for nli mode."})
+    grpo_text_reward_mode: str = field(default="entailment", metadata={"help": "Only atomic relation-aware entailment is supported."})
+    grpo_text_nli_model_path: Optional[str] = field(default=None, metadata={"help": "Local frozen entailment model used for atomic explanation scoring."})
     grpo_text_nli_device: str = field(default="cpu")
     grpo_text_nli_batch_size: int = field(default=32)
     grpo_text_max_words: int = field(default=80)
@@ -2349,12 +2349,11 @@ def train(attn_implementation="eager"):
             )
         if training_args.grpo_group_size < 2:
             raise ValueError("GRPO requires --grpo_group_size >= 2")
-        if training_args.grpo_text_reward_mode not in {"lexical", "nli"}:
-            raise ValueError("--grpo_text_reward_mode must be lexical or nli")
+        if training_args.grpo_text_reward_mode != "entailment":
+            raise ValueError("--grpo_text_reward_mode must be entailment; lexical/NLI-v1 rewards were retired")
         if (training_args.grpo_explanation_weight > 0
-                and training_args.grpo_text_reward_mode == "nli"
                 and not training_args.grpo_text_nli_model_path):
-            raise ValueError("NLI text reward requires --grpo_text_nli_model_path pointing to a local frozen model")
+            raise ValueError("Explanation reward requires --grpo_text_nli_model_path pointing to a local frozen entailment model")
         reference_model = FrozenTrainableReference(model).eval()
         explanation_judge = None
         if training_args.grpo_explanation_weight > 0:
@@ -2414,7 +2413,10 @@ def train(attn_implementation="eager"):
                 "OPD teacher cache was generated with a different checkpoint. "
                 f"cache={cached_teacher_path}, --opd_teacher_model_path={training_args.opd_teacher_model_path}."
             )
-        cached_replay_path = cache_manifest.get("replay_path") if isinstance(cache_manifest, dict) else None
+        cached_replay_path = (
+            cache_manifest.get("selected_replay_path") or cache_manifest.get("replay_path")
+            if isinstance(cache_manifest, dict) else None
+        )
         if cached_replay_path and os.path.normcase(os.path.abspath(cached_replay_path)) != os.path.normcase(os.path.abspath(data_args.replay_path)):
             raise ValueError(
                 "OPD teacher cache was generated from a different replay file. "

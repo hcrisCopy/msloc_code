@@ -1,29 +1,24 @@
-# 第二阶段训练与测试运行说明
+# 第二阶段运行说明
 
-第一阶段先用 DeMamba 生成疑似伪造的 proposal。第二阶段用这些 proposal 训练 TRACE：先根据标注学习定位和解释（SFT）；再让能看到真实参考视频的教师纠正只看待检测视频的学生（OPD）；最后根据定位、解释和输出格式的得分继续优化模型（GRPO）。如果现有模型不能从真实视频对照中得到帮助，就先重新训练一个能理解上下拼接画面的教师。
+所有命令都在 `msloc_code` 根目录运行，路径均为相对路径。第二阶段只接收第一阶段的训练集、测试集 proposal JSON；其余输入是数据集标注、视频和 TRACE 基础权重。
 
-第二阶段只使用第一阶段在训练集、测试集上实际预测的 proposal，以及 TASLE-CoT-10K 的标注和视频。
-
-所有命令都在 `msloc_code` 根目录运行，路径均为相对路径。正式实验默认单机 8 卡，每张卡加载一份完整模型并处理约八分之一数据。
-
-## 流程总览
+## 正确流程
 
 ```text
-训练集 proposal + 训练标注
-  ├─> 只看待检测视频的基础模型 ──────────────────> OPD 学生初始权重
-  ├─> 带真实视频对照的训练样本 ──────────────────> 教师检查
-  │                                                └─不合格：从 trace-uni 重新训练上下拼接教师，再检查
-  │                                                                                  └─> OPD 冻结教师
-  └─> 包含全部 proposal 的训练样本 ──────────────> GRPO
+同一 TRACE 基础权重
+  ├─ 训练 proposal + 待检视频 ─> Student SFT ─> 测试
+  └─ 训练 proposal + 上真下待检视频 ─> Teacher SFT ─> paired 测试
 
-测试集 proposal + GRPO 模型 ───────────────────> 最终测试结果
+训练 proposal 上逐条比较 Student 与 Teacher
+  └─ 只保留 Teacher 二分类纠错成功或正样本定位 IoU 严格提升的样本
+       └─ OPD ─> 测试 ─> GRPO ─> 测试
 ```
 
-第一阶段交给第二阶段的文件只有训练集、测试集 proposal JSON。第二阶段另外读取数据集标注和视频，不需要第一阶段的模型内部特征或训练状态。真实参考视频只供教师重训、教师检查和 OPD 教师使用，不会出现在 OPD 学生、GRPO 或测试输入中。
+教师输入不是把两幅画面压成半高，也不是沿时间前后拼接。每个时间点构造“上方真实参考、下方待检”的逻辑画面；冻结 CLIP 分别编码两个原尺寸 336×336 视图，再按上下顺序拼 patch token。这样保留空间细节和逐帧对齐关系，也避免直接编码 672×336 长图带来的自注意力显存增长。学生、OPD 输出模型、GRPO 和正式测试始终只看待检视频。
 
-## 0. 运行前准备
+现有 `ref_projector`、CLoss、OPD disagreement focusing、guided rollout、正负 anchor 和 structure-aware GRPO 全部保留。当前工作树和全部 Git 历史中没有名为 DMA、EMA、LAA 的实现或参数；本次没有删除它们，也没有根据缩写臆造代码。若它们来自另一分支，需要拿到那份代码后再合并。
 
-DeMamba 使用 `msloc` 环境，TRACE 的训练和测试使用 `trace` 环境。
+## 0. 环境、八卡与恢复
 
 ```bash
 conda create -n trace python=3.10 -y
@@ -34,87 +29,27 @@ hf download cross-encoder/nli-deberta-v3-small \
   --local-dir ../MSLoc_data/Trace/ckpts/nli-deberta-v3-small
 ```
 
-把预先生成的类别特征文件放到：
+类别特征放在 `../MSLoc_data/Trace/class_features_bge.pt`。
 
-```text
-../MSLoc_data/Trace/class_features_bge.pt
-```
+- 首次运行用 `--clean`；恢复时删除 `--clean`。
+- 训练恢复：把 `--resume none` 改为 `--resume auto`，也可传具体 checkpoint。
+- 样本构建恢复：加入 `--resume`；预检恢复：改为 `--resume auto`；测试恢复：加入 `--resume`。
+- 单卡正式检查只需把 `--devices` 改为 `0`、`--nproc-per-node` 改为 `1`，其余训练参数不变。测试只把 `--devices` 改为 `0`。
+- DDP 每个 rank 在一张卡加载完整模型并处理约八分之一数据。代码不自动缩小 batch、帧数或模型。训练、预检和测试均有 tqdm；主进程保留指标打印；固定禁用 WandB。
 
-SFT、OPD 和 GRPO 必须始终使用同一份文件。它只提供异常类别名称及其 BGE 特征，不需要在训练时再次加载 BGE 模型。
-
-- 第一次运行使用 `--clean` 清理这个步骤以前的输出。恢复中断任务时必须去掉 `--clean`。
-- 恢复训练：把 `--resume none` 改为 `--resume auto`。
-- 恢复教师检查：把 `--resume none` 改为 `--resume auto`。
-- 恢复测试：加入 `--resume`。
-
-## 1. 检查或生成训练集、测试集的 proposal
-
-先检查下面两个文件是否已经生成：
-
-```bash
-ls -lh \
-  ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json \
-  ../MSLoc_data/DeMamba/full/method/eval/predictions.json
-```
-
-如果文件存在且内容完整，还要确认：
-
-- `eval_train/predictions.json` 来自当前 DeMamba 权重对 `train_all_1209.json` 的推理；
-- `eval/predictions.json` 来自当前 DeMamba 权重对 `test_all_1209.json` 的推理。
-
-两者都符合时，直接从第 2 节开始。缺少哪个文件，或者文件对应的权重、数据划分不对，就只运行下面相应的命令。
-
-生成训练集 proposal：
-
-```bash
-conda activate msloc
-python DeMamba/eval.py \
-  --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml \
-  --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json \
-  --dataset-base-path ../MSLoc_data/DeMamba/video_frames \
-  --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth \
-  --output_dir ../MSLoc_data/DeMamba/full/method/eval_train \
-  --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
-  --device-ids 0,1,2,3,4,5,6,7 \
-  --val-batch-size 16 \
-  --num-workers 4 \
-  --save-progress \
-  --cache-data \
-  --clean
-```
-
-生成测试集 proposal：
-
-```bash
-python DeMamba/eval.py \
-  --config ../MSLoc_data/DeMamba/full/configs/xclip_neurons_full.yaml \
-  --neuron-indices-path ../MSLoc_data/DeMamba/full/method/evidence_probe/xclip_neuron_indices_checkpoint.json \
-  --dataset-base-path ../MSLoc_data/DeMamba/video_frames \
-  --model_path ../MSLoc_data/DeMamba/full/method/results/best_acc.pth \
-  --output_dir ../MSLoc_data/DeMamba/full/method/eval \
-  --anno-file ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
-  --device-ids 0,1,2,3,4,5,6,7 \
-  --val-batch-size 16 \
-  --num-workers 4 \
-  --save-progress \
-  --cache-data \
-  --clean
-```
-
-中断恢复时去掉 `--clean`，加入 `--resume`。输出：
+第一阶段必须已经生成：
 
 ```text
 ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json
 ../MSLoc_data/DeMamba/full/method/eval/predictions.json
 ```
 
-## 2. 按论文方法训练只看待检测视频的模型
+它们分别对应 `train_all_1209.json` 和 `test_all_1209.json`。
 
-这一步复现论文第二阶段的 SFT。每个 proposal 按“左边界 16 帧、内部 8 帧、右边界 16 帧”抽取 40 帧；`ref_projector` 分别整理边界变化和片段内部信息，三个异常感知 token 再学习标注中的异常类别。模型同时学习是否存在伪造、伪造起止时间和文字解释。
+## 1. Student SFT
 
 ```bash
-conda activate trace
-python Trace/run_opd_grpo.py sft \
+python Trace/run_opd_grpo.py student-sft \
   --devices 0,1,2,3,4,5,6,7 \
   --nproc-per-node 8 \
   --proposals ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json \
@@ -123,7 +58,7 @@ python Trace/run_opd_grpo.py sft \
   --base-model ../MSLoc_data/Trace/ckpts/trace-uni \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
   --deepspeed Trace/scripts/zero2.json \
-  --output ../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft \
+  --output ../MSLoc_data/Trace/experiments/opd_grpo/student_sft \
   --version v1_mistral \
   --mm-projector-type ref_projector \
   --closs true \
@@ -161,27 +96,62 @@ python Trace/run_opd_grpo.py sft \
   --gradient-checkpointing true \
   --num-workers 4 \
   --sample-scheme rand \
-  --run-name ref2_sft \
+  --run-name student_sft \
   --max-samples 0 \
   --resume none \
   --clean
 ```
 
-输出：`../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft/`。
+输出：`../MSLoc_data/Trace/experiments/opd_grpo/student_sft/`。
 
-## 3. 整理后续训练所需的样本文件
+## 2. 测试 Student SFT
 
-需要从训练集 proposal 和标注中整理出两个 JSON 文件：
+```bash
+python Trace/run_opd_grpo.py test \
+  --devices 0,1,2,3,4,5,6,7 \
+  --model ../MSLoc_data/Trace/experiments/opd_grpo/student_sft \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
+  --output ../MSLoc_data/Trace/inference_results/student_sft_test \
+  --metrics-output ../MSLoc_data/Trace/inference_results/student_sft_test/metrics.json \
+  --prompt-file Trace/trace/prompts/dvc.txt \
+  --num-frames 40 \
+  --max-new-tokens 512 \
+  --batch-size 1 \
+  --sample-num -1 \
+  --bnd-ratio 0.2 \
+  --bnd-frames 16 \
+  --seg-frames 8 \
+  --clean
+```
 
-- `opd_training_samples.json`：只保留能找到真实参考视频的样本，记录待检测视频、真实参考视频、proposal 和标注，用于教师检查、教师重训和 OPD。
-- `grpo_training_samples.json`：保留全部有效 proposal，包括真实视频上的误报，用于 GRPO。
+输出目录包含各卡进度、合并推理 JSON、严格解析状态和 `metrics.json`。
+
+## 3. 构建三份样本
+
+paired 样本只保留存在同时间轴真实参考的 fake 源视频，但同时保留其正、负 proposal；GRPO 样本保留全部 proposal，包括真实视频误报。
+
+测试集是否带有可用的真实参考，不能只根据标注文件名推断。下面第二条命令会逐条检查标注中的参考路径或同目录 `*_real.mp4` 是否真实存在；只有检查通过，才能执行第 5 节的 Teacher paired 测试。若构建结果为空或报告缺失参考，应跳过 Teacher 测试，不能伪造参考视频，也不能拿训练集参考替代测试集参考。
 
 ```bash
 python Trace/run_opd_grpo.py build-samples \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --proposals ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
-  --output ../MSLoc_data/Trace/experiments/opd_grpo/opd_training_samples.json \
+  --output ../MSLoc_data/Trace/experiments/opd_grpo/train_paired_samples.json \
+  --near-negative-seconds 1.0 \
+  --max-records 0 \
+  --paired-only \
+  --require-reference \
+  --clean
+
+python Trace/run_opd_grpo.py build-samples \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --output ../MSLoc_data/Trace/experiments/opd_grpo/test_paired_samples.json \
   --near-negative-seconds 1.0 \
   --max-records 0 \
   --paired-only \
@@ -197,64 +167,23 @@ python Trace/run_opd_grpo.py build-samples \
   --clean
 ```
 
-输出：
+构建过程每 100 个 proposal 源记录原子写入一次 `.progress.json`，完成后自动删除。
 
-```text
-../MSLoc_data/Trace/experiments/opd_grpo/opd_training_samples.json
-../MSLoc_data/Trace/experiments/opd_grpo/grpo_training_samples.json
-```
+## 4. Teacher SFT
 
-## 4. 检查教师模型；不合格时重新训练
-
-### 4.1 先检查第 2 步得到的模型
-
-这里使用第 1 步在训练集上生成的 proposal，不是最终的测试集评测。检查时不更新模型权重，而是让同一个模型分别处理两种输入：只看待检测视频，以及同时看“上方真实参考视频、下方待检测视频”的拼接画面。如果加入真实参考视频后定位效果确实改善，且误报没有明显增加，这个模型才适合作为 OPD 的教师。检查结果也会记录哪些 proposal 的教师输出可信，供后续 OPD 训练使用。
-
-```bash
-python Trace/run_opd_grpo.py check-teacher \
-  --devices 0,1,2,3,4,5,6,7 \
-  --nproc-per-node 8 \
-  --training-samples ../MSLoc_data/Trace/experiments/opd_grpo/opd_training_samples.json \
-  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
-  --teacher-model ../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft \
-  --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
-  --output ../MSLoc_data/Trace/experiments/opd_grpo/teacher_check_result.json \
-  --prompt-file Trace/trace/prompts/dvc.txt \
-  --version v1_mistral \
-  --bnd-ratio 0.2 \
-  --bnd-frames 16 \
-  --seg-frames 8 \
-  --max-new-tokens 128 \
-  --teacher-iou-gate 0.3 \
-  --minimum-recovery-improvement 0.01 \
-  --minimum-reliable-positive-rate 0.05 \
-  --maximum-negative-noevent-drop 0.02 \
-  --max-samples 0 \
-  --resume none \
-  --clean
-```
-
-如果检查通过，跳过 4.2。后续 OPD 的 `--teacher-model` 使用 `../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft`。
-
-如果检查失败，程序仍会保存检查报告，但 OPD 会拒绝使用这份结果。此时继续执行 4.2。
-
-### 4.2 从最初权重重新训练输入上下拼接的教师
-
-教师必须从最初的 `trace-uni` 权重重新训练，不能从第 2 步的模型继续训练。训练标签不变，但输入改成“上方真实参考视频、下方待检测视频”，文字提示也会明确说明上下画面的含义。
-
-这个模型以后只作为冻结教师使用。OPD 学生仍从第 2 步的模型开始训练。
+教师必须从与学生相同的 `trace-uni` 基础权重独立训练，不能从 Student SFT 接着训练。
 
 ```bash
 python Trace/run_opd_grpo.py train-paired-teacher \
   --devices 0,1,2,3,4,5,6,7 \
   --nproc-per-node 8 \
-  --training-samples ../MSLoc_data/Trace/experiments/opd_grpo/opd_training_samples.json \
+  --training-samples ../MSLoc_data/Trace/experiments/opd_grpo/train_paired_samples.json \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --base-model ../MSLoc_data/Trace/ckpts/trace-uni \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
   --deepspeed Trace/scripts/zero2.json \
-  --output ../MSLoc_data/Trace/experiments/opd_grpo/opd_teacher_paired_sft \
+  --output ../MSLoc_data/Trace/experiments/opd_grpo/teacher_sft \
   --version v1_mistral \
   --mm-projector-type ref_projector \
   --closs true \
@@ -292,37 +221,86 @@ python Trace/run_opd_grpo.py train-paired-teacher \
   --gradient-checkpointing true \
   --num-workers 4 \
   --sample-scheme rand \
-  --run-name opd_teacher_paired_sft \
+  --run-name teacher_sft \
   --max-samples 0 \
   --resume none \
   --clean
 ```
 
-训练完成后，重新运行 4.1 的检查命令，只改教师权重目录：
+输出：`../MSLoc_data/Trace/experiments/opd_grpo/teacher_sft/`。
 
-```text
---teacher-model ../MSLoc_data/Trace/experiments/opd_grpo/opd_teacher_paired_sft
+## 5. 测试 Teacher SFT
+
+仅当第 3 节确认测试 split 的真实参考文件存在时，才执行本节。教师输入与部署模型不同，所以用测试 paired proposal 单独报告 proposal 级真假/定位指标。`--enforce-better false` 只保存结果，不用测试集做训练筛选。
+
+```bash
+python Trace/run_opd_grpo.py check-teacher \
+  --devices 0,1,2,3,4,5,6,7 \
+  --nproc-per-node 8 \
+  --training-samples ../MSLoc_data/Trace/experiments/opd_grpo/test_paired_samples.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --student-model ../MSLoc_data/Trace/experiments/opd_grpo/student_sft \
+  --teacher-model ../MSLoc_data/Trace/experiments/opd_grpo/teacher_sft \
+  --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
+  --output ../MSLoc_data/Trace/inference_results/teacher_sft_test/report.json \
+  --selected-output ../MSLoc_data/Trace/inference_results/teacher_sft_test/teacher_better_samples.json \
+  --prompt-file Trace/trace/prompts/dvc.txt \
+  --version v1_mistral \
+  --bnd-ratio 0.2 \
+  --bnd-frames 16 \
+  --seg-frames 8 \
+  --max-new-tokens 128 \
+  --teacher-iou-gate 0.3 \
+  --max-samples 0 \
+  --enforce-better false \
+  --resume none \
+  --clean
 ```
 
-保留 `--clean`，清掉上一次失败报告和旧检查进度。新的检查结果保存在 `../MSLoc_data/Trace/experiments/opd_grpo/teacher_check_result.json`。
+`report.json` 分开给出两类指标：`binary_accuracy` 只判断 fake / no forgery；正样本的 `positive_mean_iou` 和 `positive_localized_rate` 再衡量片段定位。`joint_binary_localization_accuracy` 仅作辅助报告，其中正样本使用显式传入的 `--teacher-iou-gate 0.3`，这个阈值不参与 OPD 样本筛选。
 
-## 5. 用合格教师训练 OPD 学生模型
+## 6. 训练集预检与筛选
 
-这一步仍使用第 1 步在训练集上生成的 proposal。学生从第 2 步的 SFT 权重继续训练，只看待检测视频；通过预检的教师保持冻结，在同一个 proposal 上看“上方真实参考视频、下方待检测视频”的拼接画面。只有预检标记为可信的 proposal 才会计算教师指导部分的损失，训练期间只更新学生。这样学生在实际使用时仍然只需要待检测视频。
+- 正 proposal：如果 Student 输出 `No forgery.` 或格式错误，而 Teacher 正确输出 fake，则按二分类纠错选中；如果两者都输出 fake，只要 Teacher IoU 严格大于 Student IoU 就选中，不再设置额外 IoU 增量门槛。
+- 负 proposal：Teacher 正确输出 no-event，而 Student 输出事件或格式失败。
+- Teacher 不可靠、只打平或更差的样本不会进入 OPD。
 
-下面的命令按“4.1教师预检失败，重新训练的上下拼接教师已经通过预检”执行。
-如果 4.1 首次检查已经通过，只需要把 `--teacher-model` 改为 `../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft`或者相应的教师模型权重。
+```bash
+python Trace/run_opd_grpo.py check-teacher \
+  --devices 0,1,2,3,4,5,6,7 \
+  --nproc-per-node 8 \
+  --training-samples ../MSLoc_data/Trace/experiments/opd_grpo/train_paired_samples.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --student-model ../MSLoc_data/Trace/experiments/opd_grpo/student_sft \
+  --teacher-model ../MSLoc_data/Trace/experiments/opd_grpo/teacher_sft \
+  --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
+  --output ../MSLoc_data/Trace/experiments/opd_grpo/teacher_precheck.json \
+  --selected-output ../MSLoc_data/Trace/experiments/opd_grpo/opd_selected_samples.json \
+  --prompt-file Trace/trace/prompts/dvc.txt \
+  --version v1_mistral \
+  --bnd-ratio 0.2 \
+  --bnd-frames 16 \
+  --seg-frames 8 \
+  --max-new-tokens 128 \
+  --teacher-iou-gate 0.3 \
+  --max-samples 0 \
+  --enforce-better true \
+  --resume none \
+  --clean
+```
 
-`--student-model` 使用第 2 步的结果；如果已有按第 2 步同样方法训练好的学生 SFT 权重，可以直接把这个参数换成实际权重目录，不需要重新运行第 2 步。
+如果没有任何 Teacher 严格优于 Student 的样本，报告仍保存，但命令退出且不能继续 OPD。这里不再设置整体提升门槛。OPD 只读 `opd_selected_samples.json`。
+
+## 7. OPD
 
 ```bash
 python Trace/run_opd_grpo.py opd \
   --devices 0,1,2,3,4,5,6,7 \
   --nproc-per-node 8 \
-  --training-samples ../MSLoc_data/Trace/experiments/opd_grpo/opd_training_samples.json \
-  --student-model ../MSLoc_data/Trace/experiments/opd_grpo/ref2_sft \
-  --teacher-model ../MSLoc_data/Trace/experiments/opd_grpo/opd_teacher_paired_sft \
-  --teacher-check-result ../MSLoc_data/Trace/experiments/opd_grpo/teacher_check_result.json \
+  --training-samples ../MSLoc_data/Trace/experiments/opd_grpo/opd_selected_samples.json \
+  --student-model ../MSLoc_data/Trace/experiments/opd_grpo/student_sft \
+  --teacher-model ../MSLoc_data/Trace/experiments/opd_grpo/teacher_sft \
+  --teacher-check-result ../MSLoc_data/Trace/experiments/opd_grpo/teacher_precheck.json \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
@@ -386,16 +364,32 @@ python Trace/run_opd_grpo.py opd \
 
 输出：`../MSLoc_data/Trace/experiments/opd_grpo/opd/`。
 
-## 6. 用定位和解释得分继续训练
+## 8. 测试 OPD
 
-GRPO 从第 5 步的学生模型开始训练，只看待检测视频，不再使用真实参考视频或教师模型。训练样本中保留真实视频误报，用来约束模型不能一味把所有 proposal 都判断为伪造。
+```bash
+python Trace/run_opd_grpo.py test \
+  --devices 0,1,2,3,4,5,6,7 \
+  --model ../MSLoc_data/Trace/experiments/opd_grpo/opd \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
+  --output ../MSLoc_data/Trace/inference_results/opd_test \
+  --metrics-output ../MSLoc_data/Trace/inference_results/opd_test/metrics.json \
+  --prompt-file Trace/trace/prompts/dvc.txt \
+  --num-frames 40 \
+  --max-new-tokens 512 \
+  --batch-size 1 \
+  --sample-num -1 \
+  --bnd-ratio 0.2 \
+  --bnd-frames 16 \
+  --seg-frames 8 \
+  --clean
+```
 
-文字解释奖励的重点如下：
+## 9. GRPO
 
-- 只给定位正确的伪造样本计算解释奖励。输出格式必须正确，并且预测时间段与标注的 IoU 至少达到 `0.3`；否则解释写得再好也不得分。
-- 评分依据来自标注中的物体异常、异常开始和异常结束等信息，不要求生成文字逐字复述标注。
-- NLI 模式使用冻结的 NLI 模型识别同义表达并惩罚矛盾；这个模型只负责评分，不参与训练。
-- 空泛描述、重复内容和过长解释会被扣分。真实视频或不与伪造片段相交的 proposal 不要求生成解释，只检查是否正确输出“无伪造”。
+三种奖励是定位、TRACE 格式和解释。解释奖励删除 lexical 路径，也不再依赖手写同义词表：将对象异常、开始、结束标注拆成最多三个带关系事实，用冻结 entailment cross-encoder 对生成的原子 claim 做一对一匹配，计算事实覆盖率、claim 精确率，并惩罚矛盾、重复和超长内容。只有正样本定位 IoU≥0.3 时才启用解释分。正式实验沿用 SFT 使用的人工解释标注作为监督，因此不额外要求 `candidate_observable` 审计；如果以后提供逐条可观察性审计，再把该开关设为 true。
 
 ```bash
 python Trace/run_opd_grpo.py grpo \
@@ -407,7 +401,7 @@ python Trace/run_opd_grpo.py grpo \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
   --deepspeed Trace/scripts/zero2.json \
-  --output ../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli \
+  --output ../MSLoc_data/Trace/experiments/opd_grpo/grpo \
   --version v1_mistral \
   --mm-projector-type ref_projector \
   --closs true \
@@ -445,7 +439,7 @@ python Trace/run_opd_grpo.py grpo \
   --gradient-checkpointing true \
   --num-workers 4 \
   --sample-scheme rand \
-  --run-name grpo_nli \
+  --run-name grpo \
   --max-samples 0 \
   --resume none \
   --group-size 4 \
@@ -457,37 +451,31 @@ python Trace/run_opd_grpo.py grpo \
   --format-weight 0.1 \
   --explanation-iou-gate 0.3 \
   --boundary-tolerance 1.0 \
-  --text-reward-mode nli \
   --text-max-words 80 \
   --require-candidate-observable false \
-  --nli-model-path ../MSLoc_data/Trace/ckpts/nli-deberta-v3-small \
-  --nli-device cuda \
-  --nli-batch-size 32 \
+  --entailment-model-path ../MSLoc_data/Trace/ckpts/nli-deberta-v3-small \
+  --entailment-device cuda \
+  --entailment-batch-size 32 \
   --structure-aware true \
   --kl-coef 0.02 \
   --sft-coef 0.1 \
   --clean
 ```
 
-输出：`../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli/`。
+日志关注 `grpo_loc_reward`、`grpo_exp_reward`、`grpo_fmt_reward`、`grpo_group_std`、`grpo_text_graph_precision`、`grpo_text_graph_recall` 和 `grpo_text_contradiction`。
 
-训练时主要查看定位、解释、格式、组内差异和文字矛盾这几项：`grpo_loc_reward`、`grpo_exp_reward`、`grpo_fmt_reward`、`grpo_group_std`、`grpo_text_contradiction`。
-
-若要使用不加载 NLI 模型的词面评分（另一种文本解释奖励方式，比较简单，可以不考虑），把 `--text-reward-mode nli` 改为 `--text-reward-mode lexical`，删除三个 `--nli-*` 参数，并换一个输出目录。
-两种方法都应从同一个 OPD 权重开始，不能接着彼此的结果继续训练。
-
-## 7. 测试最终模型
-
-测试时模型只看第一阶段在测试集上预测的 proposal。每张卡加载一份完整模型并负责一部分视频；所有显卡完成后，程序自动合并结果。
+## 10. 测试 GRPO
 
 ```bash
 python Trace/run_opd_grpo.py test \
   --devices 0,1,2,3,4,5,6,7 \
-  --model ../MSLoc_data/Trace/experiments/opd_grpo/grpo_nli \
+  --model ../MSLoc_data/Trace/experiments/opd_grpo/grpo \
   --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
-  --output ../MSLoc_data/Trace/inference_results/grpo_nli_test \
+  --output ../MSLoc_data/Trace/inference_results/grpo_test \
+  --metrics-output ../MSLoc_data/Trace/inference_results/grpo_test/metrics.json \
   --prompt-file Trace/trace/prompts/dvc.txt \
   --num-frames 40 \
   --max-new-tokens 512 \
@@ -499,4 +487,4 @@ python Trace/run_opd_grpo.py test \
   --clean
 ```
 
-最终结果：`../MSLoc_data/Trace/inference_results/grpo_nli_test/fmt_aigc_test_f40_result.json`。
+最终比较 Student SFT、Teacher SFT paired proposal 报告、OPD 和 GRPO。Student/OPD/GRPO 使用相同测试 proposal 和长视频指标；Teacher 输入不同，必须单列 paired proposal 指标，不能与部署模型的长视频指标混为一列。

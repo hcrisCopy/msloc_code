@@ -217,7 +217,10 @@ def _validate_distinct_teacher_base(student_checkpoint: str, teacher_checkpoint:
     student_path = Path(student_checkpoint)
     teacher_path = Path(teacher_checkpoint)
     if student_path.resolve() == teacher_path.resolve():
-        return
+        raise ValueError(
+            "Student and teacher must be separately SFT-trained checkpoints from the same base; "
+            "they cannot be the same directory"
+        )
 
     for role, checkpoint in (("student", student_path), ("teacher", teacher_path)):
         if not checkpoint.is_dir():
@@ -367,24 +370,24 @@ def run_grpo(args) -> None:
         "--grpo_format_weight", str(args.format_weight),
         "--grpo_explanation_iou_gate", str(args.explanation_iou_gate),
         "--grpo_boundary_tolerance", str(args.boundary_tolerance),
-        "--grpo_text_reward_mode", args.text_reward_mode,
+        "--grpo_text_reward_mode", "entailment",
         "--grpo_text_max_words", str(args.text_max_words),
         "--grpo_text_require_candidate_observable", args.require_candidate_observable,
         "--grpo_structure_aware", args.structure_aware,
         "--grpo_kl_coef", str(args.kl_coef), "--grpo_sft_coef", str(args.sft_coef),
     ]
-    if args.text_reward_mode == "nli":
-        if not args.nli_model_path:
-            raise ValueError("--nli-model-path is required for --text-reward-mode nli")
-        train_args += [
-            "--grpo_text_nli_model_path", args.nli_model_path,
-            "--grpo_text_nli_device", args.nli_device,
-            "--grpo_text_nli_batch_size", str(args.nli_batch_size),
-        ]
+    if args.explanation_weight > 0 and not args.entailment_model_path:
+        raise ValueError("--entailment-model-path is required when --explanation-weight is positive")
+    train_args += [
+        "--grpo_text_nli_model_path", args.entailment_model_path,
+        "--grpo_text_nli_device", args.entailment_device,
+        "--grpo_text_nli_batch_size", str(args.entailment_batch_size),
+    ]
     _torchrun(args, TRACE_ROOT / "trace" / "train_mt.py", train_args)
     _write_stage_manifest(args, "grpo", {
         "opd_checkpoint": args.opd_checkpoint, "replay": args.replay,
-        "input_mode": "candidate_only", "text_reward_mode": args.text_reward_mode,
+        "input_mode": "candidate_only", "text_reward_mode": "atomic_entailment_v2",
+        "entailment_model_path": args.entailment_model_path,
         "mm_projector_type": args.mm_projector_type,
         "closs": args.closs == "True",
     })
@@ -409,27 +412,30 @@ def run_replay(args) -> None:
         command.append("--require-reference")
     if args.stratified_debug:
         command.append("--stratified-debug")
+    if args.resume:
+        command.append("--resume")
     if args.clean:
         command.append("--clean")
     _run(command)
 
 
 def run_precheck(args) -> None:
+    _validate_distinct_teacher_base(args.student_checkpoint, args.teacher_checkpoint)
     if args.clean and args.resume != "none":
         raise ValueError("--clean and --resume cannot be used together")
     script_args = [
         "--replay", args.replay, "--data-folder", args.video_root,
+        "--student-model-path", args.student_checkpoint,
         "--model-path", args.teacher_checkpoint, "--vision-tower", args.vision_tower,
-        "--output", args.output, "--prompt-file", args.prompt_file, "--version", args.version,
+        "--output", args.output, "--selected-output", args.selected_output,
+        "--prompt-file", args.prompt_file, "--version", args.version,
         "--bnd-ratio", str(args.bnd_ratio), "--bnd-frames", str(args.bnd_frames),
         "--seg-frames", str(args.seg_frames), "--max-new-tokens", str(args.max_new_tokens),
         "--teacher-iou-gate", str(args.teacher_iou_gate),
         "--max-samples", str(args.max_samples),
-        "--minimum-recovery-improvement", str(args.minimum_recovery_improvement),
-        "--minimum-reliable-positive-rate", str(args.minimum_reliable_positive_rate),
-        "--maximum-negative-noevent-drop", str(args.maximum_negative_noevent_drop),
-        "--enforce-pair-benefit",
     ]
+    if args.enforce_better == "True":
+        script_args.append("--enforce-pair-benefit")
     if args.clean:
         script_args.append("--clean")
     if args.resume != "none":
@@ -531,6 +537,15 @@ def run_eval(args) -> None:
             signal.signal(sig, handler)
     final = _merge_eval_results(args)
     print(f"Merged {len(args.devices)} chunks: {final}")
+    metrics_command = [
+        sys.executable, str(WORKSPACE_ROOT / "evaluate_long.py"),
+        "--gt_file", args.annotation,
+        "--infer_file", str(final),
+        "--output_file", args.metrics_output,
+    ]
+    if args.resume:
+        metrics_command.append("--reuse-existing")
+    _run(metrics_command)
 
 
 def add_distributed(parser: argparse.ArgumentParser) -> None:
@@ -599,8 +614,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="stage", required=True)
 
     sft = subparsers.add_parser(
-        "sft", aliases=["student-sft", "teacher-sft"],
-        help="Candidate-only paper ref2 SFT; one checkpoint can serve as the initial teacher and student",
+        "student-sft", aliases=["sft"],
+        help="Train the candidate-only student from the shared base checkpoint",
     )
     add_train_common(sft, default_lr=5e-6, default_freeze_backbone="False")
     sft.add_argument("--proposals", required=True)
@@ -622,6 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--paired-only", action="store_true")
     replay.add_argument("--require-reference", action="store_true")
     replay.add_argument("--stratified-debug", action="store_true")
+    replay.add_argument("--resume", action="store_true")
     replay.add_argument("--clean", action="store_true")
     replay.set_defaults(handler=run_replay)
 
@@ -632,9 +648,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_distributed(precheck)
     precheck.add_argument("--training-samples", "--replay", dest="replay", required=True)
     precheck.add_argument("--video-root", required=True)
+    precheck.add_argument("--student-model", "--student-checkpoint", dest="student_checkpoint", required=True)
     precheck.add_argument("--teacher-model", "--teacher-checkpoint", dest="teacher_checkpoint", required=True)
     precheck.add_argument("--vision-tower", required=True)
     precheck.add_argument("--output", required=True)
+    precheck.add_argument("--selected-output", required=True)
     precheck.add_argument("--prompt-file", required=True)
     precheck.add_argument("--version", default="v1_mistral")
     precheck.add_argument("--bnd-ratio", type=float, default=0.2)
@@ -642,9 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
     precheck.add_argument("--seg-frames", type=int, default=8)
     precheck.add_argument("--max-new-tokens", type=int, default=128)
     precheck.add_argument("--teacher-iou-gate", type=float, default=0.3)
-    precheck.add_argument("--minimum-recovery-improvement", type=float, default=0.01)
-    precheck.add_argument("--minimum-reliable-positive-rate", type=float, default=0.05)
-    precheck.add_argument("--maximum-negative-noevent-drop", type=float, default=0.02)
+    precheck.add_argument("--enforce-better", type=_bool, default="True")
     precheck.add_argument("--max-samples", type=int, default=0)
     precheck.add_argument("--resume", default="none", choices=("none", "auto"))
     precheck.add_argument("--clean", action="store_true")
@@ -693,12 +709,11 @@ def build_parser() -> argparse.ArgumentParser:
     grpo.add_argument("--format-weight", type=float, default=0.1)
     grpo.add_argument("--explanation-iou-gate", type=float, default=0.3)
     grpo.add_argument("--boundary-tolerance", type=float, default=1.0)
-    grpo.add_argument("--text-reward-mode", choices=("lexical", "nli"), required=True)
     grpo.add_argument("--text-max-words", type=int, default=80)
     grpo.add_argument("--require-candidate-observable", type=_bool, default="False")
-    grpo.add_argument("--nli-model-path", default="")
-    grpo.add_argument("--nli-device", default="cuda")
-    grpo.add_argument("--nli-batch-size", type=int, default=32)
+    grpo.add_argument("--entailment-model-path", default="")
+    grpo.add_argument("--entailment-device", default="cuda")
+    grpo.add_argument("--entailment-batch-size", type=int, default=32)
     grpo.add_argument("--structure-aware", type=_bool, default="True")
     grpo.add_argument("--kl-coef", type=float, default=0.02)
     grpo.add_argument("--sft-coef", type=float, default=0.1)
@@ -711,9 +726,11 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--devices", type=_devices, required=True)
     evaluate.add_argument("--model", "--model-checkpoint", dest="model_checkpoint", required=True)
     evaluate.add_argument("--proposals", required=True)
+    evaluate.add_argument("--annotation", required=True)
     evaluate.add_argument("--video-root", required=True)
     evaluate.add_argument("--vision-tower", required=True)
     evaluate.add_argument("--output", required=True)
+    evaluate.add_argument("--metrics-output", required=True)
     evaluate.add_argument("--prompt-file", required=True)
     evaluate.add_argument("--num-frames", type=int, default=40)
     evaluate.add_argument("--max-new-tokens", type=int, default=512)

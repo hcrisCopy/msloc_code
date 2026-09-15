@@ -11,12 +11,12 @@ height is rejected. It destroys the small spatial evidence (face boundaries,
 blending texture, and local temporal inconsistency) that the paired input is
 intended to reveal.
 
-The implementation now makes a teacher-only 672 x 336 canvas by vertically
-concatenating two unchanged 336 x 336 views. The student still receives only
-the normal candidate 336 x 336 video. The frozen CLIP visual tower interpolates
-its learned 2-D **position embeddings**, not the pixels, from a 24 x 24 grid to
-a 48 x 24 grid. This is the least invasive representation compatible with the
-present TRACE architecture.
+The implementation exposes a teacher-only 672 x 336 logical canvas made from
+two unchanged 336 x 336 views. The student still receives only the normal
+candidate view. To avoid quadratic attention over a 48 x 24 patch grid, the
+frozen CLIP tower encodes the upper and lower native-resolution halves in two
+bounded forward calls and concatenates their patch tokens in upper/lower
+order. Pixels are never resized and time remains frame-aligned.
 
 It is an experimental teacher input, not an assumption that a prompt alone
 makes a VLM reliably compare two videos. The precheck remains a mandatory
@@ -52,7 +52,7 @@ hurting paired no-event accuracy, OPD must not be run.
 | Module | Change | Why it is needed |
 |---|---|---|
 | trace/mm_utils.py | make_vertical_reference_pair now directly concatenates full-resolution tensors. | No loss of reference or candidate pixels. |
-| trace/model/multimodal_encoder/clip_encoder.py | Added a local, frozen CLIP 2-D position-interpolation path for non-native grids; native student frames retain the exact original code path. | Makes the full-height teacher canvas executable without upgrading a dependency shared by TRACE. |
+| trace/model/multimodal_encoder/clip_encoder.py | Exact two-panel inputs are split into two native CLIP calls and their tokens are concatenated; a position-interpolation compatibility path remains for other non-native shapes. | Bounds attention memory while retaining both full-resolution views and the student native path. |
 | trace/trace_trainer.py | OPD uses temperature-scaled reverse KL only at TRACE localization tokens. The sampled answer dynamically gets high weight for a positive no-event stream, positive format/IoU failure, or negative false event; correct outputs remain nonzero anchors. | Matches Video-OPD's on-policy/teacher-validated disagreement principle while directly addressing this project's measured 67.68% positive false-refusal error. |
 | trace/train_mt.py and scripts/train/opd.sh | Added validated, exposed disagreement weights and an IoU gate. | Makes the task-specific focusing reproducible rather than a hidden hard-coded filter. |
 | OPD_GRPO_RUNBOOK.md | Documents the native pair, compute cost, mandatory precheck, and reverse-KL objective. | Prevents a future run from silently reverting to the invalid half-height design. |
@@ -83,7 +83,7 @@ The code is statically checked, but this workstation has no downloaded
 checkpoint/data/GPU environment. Run, in order:
 
 1. four-sample paired precheck (--max-samples 4, no benefit enforcement) to
-   verify the 672 x 336 CLIP path, shape, and memory;
+   verify the upper/lower split-encode path, shape, and memory;
 2. full paired precheck with benefit enforcement;
 3. one-epoch OPD smoke run and inspect opd_false_refusal_rollouts,
    opd_reverse_kl, and nonzero negative-anchor counts;

@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from tqdm.auto import tqdm
 
@@ -213,24 +213,33 @@ def build_records(
     paired_only: bool = False,
     video_root: Optional[Path] = None,
     show_progress: bool = False,
+    proposal_start_index: int = 0,
+    proposal_callback: Optional[Callable[[int, List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     gt_by_video = {video_id(item): item for item in gt if video_id(item)}
     records: List[Dict[str, Any]] = []
     proposal_iter = tqdm(proposals, desc="Building replay proposals", unit="video", disable=not show_progress)
-    for proposal_source in proposal_iter:
+    for local_index, proposal_source in enumerate(proposal_iter):
+        before = len(records)
         candidate = video_id(proposal_source)
         gt_item = gt_by_video.get(candidate)
         if not candidate or not gt_item:
+            if proposal_callback:
+                proposal_callback(proposal_start_index + local_index + 1, [])
             continue
         # The paired OPD setting is deliberately restricted to fake source
         # videos with an authentic counterpart.  It includes positive and
         # negative *proposals* from those videos, but excludes unrelated real
         # videos rather than fabricating a reference by copying their input.
         if paired_only and gt_item.get("type") != "fake":
+            if proposal_callback:
+                proposal_callback(proposal_start_index + local_index + 1, [])
             continue
         base_reference = reference_map.get(candidate) or inferred_reference_descriptor(gt_item, candidate)
         if paired_only and (not base_reference or not base_reference.get("reference_video")
                             or not _exists_under_root(video_root, str(base_reference["reference_video"]))):
+            if proposal_callback:
+                proposal_callback(proposal_start_index + local_index + 1, [])
             continue
         inferred = proposal_source.get("model_inference", {})
         for proposal_index, raw_segment in enumerate(inferred.get("segment", [])):
@@ -284,6 +293,8 @@ def build_records(
                 "reference": descriptor,
             }
             records.append(record)
+        if proposal_callback:
+            proposal_callback(proposal_start_index + local_index + 1, records[before:])
     return records
 
 
@@ -327,8 +338,11 @@ def main() -> None:
     parser.add_argument("--evidence-audit", help="Optional candidate-observability diagnostic keyed as video::start-end; it does not gate GRPO reward")
     parser.add_argument("--max-records", type=int, default=0, help="Positive value keeps only the first N constructed replay records (debug only)")
     parser.add_argument("--stratified-debug", action="store_true", help="With --max-records, prioritize positive, fake-negative and real-false-positive branches")
+    parser.add_argument("--resume", action="store_true", help="Resume proposal conversion from the progress file beside --output")
     parser.add_argument("--clean", action="store_true", help="Replace an existing output manifest")
     args = parser.parse_args()
+    if args.clean and args.resume:
+        parser.error("--clean and --resume are mutually exclusive")
     if args.paired_only and not args.video_root:
         parser.error("--paired-only requires --video-root so missing _real.mp4 counterparts can be excluded")
 
@@ -346,12 +360,68 @@ def main() -> None:
             evidence_audit = json.load(handle)
         if not isinstance(evidence_audit, dict):
             raise ValueError("evidence_audit must be a JSON object keyed as video::start-end")
-    records = build_records(
-        gt, proposals, reference_map, args.near_negative_seconds, evidence_audit,
+    output_path = Path(args.output)
+    progress_path = Path(str(output_path) + ".progress.json")
+    if args.clean:
+        if output_path.is_file():
+            output_path.unlink()
+        if progress_path.is_file():
+            progress_path.unlink()
+    if output_path.exists() and not args.resume:
+        raise FileExistsError(f"{output_path} already exists; pass --clean to replace it or --resume to reuse it")
+    if args.resume and output_path.is_file() and not progress_path.is_file():
+        print(f"Replay is already complete: {output_path}")
+        return
+
+    completed_records: List[Dict[str, Any]] = []
+    next_proposal = 0
+    if args.resume:
+        if not progress_path.is_file():
+            raise FileNotFoundError(f"Replay progress is missing: {progress_path}; use --clean to start again")
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        expected = {
+            "gt": str(Path(args.gt).resolve()), "proposals": str(Path(args.proposals).resolve()),
+            "paired_only": bool(args.paired_only), "near_negative_seconds": args.near_negative_seconds,
+            "reference_map": str(Path(args.reference_map).resolve()) if args.reference_map else None,
+            "evidence_audit": str(Path(args.evidence_audit).resolve()) if args.evidence_audit else None,
+            "require_reference": bool(args.require_reference), "max_records": args.max_records,
+            "stratified_debug": bool(args.stratified_debug),
+        }
+        if progress.get("identity") != expected:
+            raise ValueError("Replay progress belongs to different inputs or parameters; use --clean")
+        next_proposal = int(progress.get("next_proposal", 0))
+        completed_records = list(progress.get("records", []))
+        print(f"[resume] Reusing {len(completed_records)} records from {next_proposal}/{len(proposals)} proposal rows")
+    else:
+        expected = {
+            "gt": str(Path(args.gt).resolve()), "proposals": str(Path(args.proposals).resolve()),
+            "paired_only": bool(args.paired_only), "near_negative_seconds": args.near_negative_seconds,
+            "reference_map": str(Path(args.reference_map).resolve()) if args.reference_map else None,
+            "evidence_audit": str(Path(args.evidence_audit).resolve()) if args.evidence_audit else None,
+            "require_reference": bool(args.require_reference), "max_records": args.max_records,
+            "stratified_debug": bool(args.stratified_debug),
+        }
+
+    def save_progress(processed: int, new_records: List[Dict[str, Any]]) -> None:
+        completed_records.extend(new_records)
+        if processed % 100 != 0 and processed != len(proposals):
+            return
+        payload = {"identity": expected, "next_proposal": processed, "records": completed_records}
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = progress_path.with_suffix(progress_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(progress_path)
+
+    new_records = build_records(
+        gt, proposals[next_proposal:], reference_map, args.near_negative_seconds, evidence_audit,
         paired_only=args.paired_only,
         video_root=Path(args.video_root).resolve() if args.video_root else None,
         show_progress=True,
+        proposal_start_index=next_proposal,
+        proposal_callback=save_progress,
     )
+    # save_progress already appended every processed proposal's rows.
+    records = completed_records
     if args.max_records < 0:
         parser.error("--max-records must be non-negative")
     if args.max_records > 0:
@@ -386,14 +456,13 @@ def main() -> None:
             "candidate_observable_evidence": sum(any(target["evidence"].get("candidate_observable", False) for target in record["targets"]) for record in records),
         },
     }
-    output_path = Path(args.output)
-    if output_path.exists() and not args.clean:
-        raise FileExistsError(f"{output_path} already exists; pass --clean to replace it")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
     with temporary_path.open("w", encoding="utf-8") as handle:
         json.dump(output, handle, ensure_ascii=False, indent=2)
     temporary_path.replace(output_path)
+    if progress_path.is_file():
+        progress_path.unlink()
     print(json.dumps(output["statistics"], ensure_ascii=False))
 
 

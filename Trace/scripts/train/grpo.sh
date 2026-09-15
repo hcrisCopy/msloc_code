@@ -12,12 +12,8 @@ DATA_ROOT=${DATA_ROOT:-"$MSLOC_ASSETS/data/Tasle-CoT-10K"}
 REPLAY_PATH=${REPLAY_PATH:?Set REPLAY_PATH to the full candidate-only GRPO replay JSON}
 OPD_CKPT=${OPD_CKPT:?Set OPD_CKPT to final candidate-only OPD student checkpoint}
 EXPLANATION_WEIGHT=${EXPLANATION_WEIGHT:-0.3}
-TEXT_REWARD_MODE=${TEXT_REWARD_MODE:-lexical}
-TEXT_REWARD_ARGS=(--grpo_text_reward_mode "$TEXT_REWARD_MODE" --grpo_text_max_words "${TEXT_MAX_WORDS:-80}")
-if [[ "$TEXT_REWARD_MODE" == "nli" ]]; then
-  NLI_MODEL_PATH=${NLI_MODEL_PATH:?Set NLI_MODEL_PATH to a local frozen NLI model directory}
-  TEXT_REWARD_ARGS+=(--grpo_text_nli_model_path "$NLI_MODEL_PATH" --grpo_text_nli_device "${NLI_DEVICE:-cpu}" --grpo_text_nli_batch_size "${NLI_BATCH_SIZE:-32}")
-fi
+ENTAILMENT_MODEL_PATH=${ENTAILMENT_MODEL_PATH:?Set ENTAILMENT_MODEL_PATH to a local frozen entailment model directory}
+TEXT_REWARD_ARGS=(--grpo_text_reward_mode entailment --grpo_text_max_words "${TEXT_MAX_WORDS:-80}" --grpo_text_nli_model_path "$ENTAILMENT_MODEL_PATH" --grpo_text_nli_device "${ENTAILMENT_DEVICE:-cuda}" --grpo_text_nli_batch_size "${ENTAILMENT_BATCH_SIZE:-32}")
 OUT_DIR=${OUT_DIR:-"$MSLOC_ASSETS/Trace/output/grpo"}
 REPORT_TO=${REPORT_TO:-none}
 DEEPSPEED_CONFIG="$TRACE_DIR/scripts/zero2.json"
