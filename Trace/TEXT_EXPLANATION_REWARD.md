@@ -1,12 +1,12 @@
 # GRPO 文字解释奖励
 
-当前正式实现只有 `atomic-entailment-v2`，旧 lexical 和“lexical + NLI”路径已经删除。
+当前正式实现只有 `atomic-entailment-v3-aligned-contradiction`，旧 lexical 和“lexical + NLI”路径已经删除。
 
 ## 为什么这样设计
 
 BLEU/ROUGE 或手写同义词表会把解释变成关键词匹配；整段给一个 NLI 分数又无法区分“漏掉关键证据”和“额外编造证据”。当前实现利用 TASLE 已有的对象异常、异常开始、异常结束三类结构化标注，先形成样本自己的 evidence facts，再把生成解释切成 atomic claims。
 
-冻结的 entailment cross-encoder 对每个 `fact → claim` 给出 entailment/contradiction 概率。随后做一对一最大权匹配：一个重复 claim 不能覆盖多个事实，一个事实也不能反复给多个 claim 加分。
+冻结的 entailment cross-encoder 对每个 `fact → claim` 给出 entailment/contradiction 概率。随后按 entailment 做一对一最大权匹配：一个重复 claim 不能覆盖多个事实，一个事实也不能反复给多个 claim 加分。矛盾分只读取已经匹配的 claim/fact 对，不再让正确的结束描述与主要异常或开始阶段交叉比较。
 
 ```text
 coverage = 带权事实召回率（对象异常权重 2，开始/结束各 1）

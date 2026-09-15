@@ -705,8 +705,23 @@ class RefProjector(nn.Module):
         super().__init__()
         self.bnd_frames = int(getattr(config, "bnd_frames", 16))
         self.seg_frames = int(getattr(config, "seg_frames", 8))
+        self.native_patch_tokens = int(getattr(config, "mm_vision_patch_tokens", 576))
         if self.bnd_frames <= 0 or self.seg_frames <= 0:
             raise ValueError("RefProjector requires positive bnd_frames and seg_frames")
+        if self.native_patch_tokens <= 0:
+            raise ValueError("RefProjector requires a positive native CLIP patch count")
+
+        # CLIP encodes the two 336x336 views independently, so corresponding
+        # reference/candidate patches initially share the same spatial
+        # positional embedding.  These two small trainable vectors preserve
+        # which half each patch came from when the projector later pools the
+        # concatenated token sequence.  Candidate-only inputs never use them.
+        hidden_size = int(config.mm_hidden_size)
+        init_std = float(getattr(config, "initializer_range", 0.02))
+        self.reference_view_embedding = nn.Parameter(torch.empty(1, 1, 1, hidden_size))
+        self.candidate_view_embedding = nn.Parameter(torch.empty(1, 1, 1, hidden_size))
+        nn.init.normal_(self.reference_view_embedding, mean=0.0, std=init_std)
+        nn.init.normal_(self.candidate_view_embedding, mean=0.0, std=init_std)
 
         # Boundary parts: bnd_frames per side. Time dimension is preserved so
         # we get one compressed token per frame plus its time token.
@@ -717,6 +732,26 @@ class RefProjector(nn.Module):
 
         self.config = config
 
+    def _add_paired_view_identity(self, x):
+        """Tag paired patch tokens without changing frames or token count."""
+        patch_tokens = x.size(2)
+        if patch_tokens == self.native_patch_tokens:
+            return x
+        expected_paired = 2 * self.native_patch_tokens
+        if patch_tokens != expected_paired:
+            raise ValueError(
+                "RefProjector received an unsupported patch-token layout: "
+                f"got {patch_tokens}, expected {self.native_patch_tokens} candidate-only "
+                f"or {expected_paired} paired tokens"
+            )
+        reference = x[:, :, :self.native_patch_tokens] + self.reference_view_embedding.to(
+            device=x.device, dtype=x.dtype
+        )
+        candidate = x[:, :, self.native_patch_tokens:] + self.candidate_view_embedding.to(
+            device=x.device, dtype=x.dtype
+        )
+        return torch.cat([reference, candidate], dim=2)
+
     def forward(self, x, time_features=None):
         # x: [b, 2*bnd_frames+seg_frames, h, w, d]
         t = x.size(1)
@@ -726,6 +761,8 @@ class RefProjector(nn.Module):
                 f"RefProjector expected {expected_frames} frames "
                 f"({self.bnd_frames}+{self.seg_frames}+{self.bnd_frames}), got {t}"
             )
+
+        x = self._add_paired_view_identity(x)
         
         # Split
         event_start = self.bnd_frames

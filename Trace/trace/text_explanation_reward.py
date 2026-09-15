@@ -186,7 +186,7 @@ class EntailmentExplanationJudge:
             return TextExplanationVerdict(
                 0.0, 0.0, 0.0, 0.0, 1.0 if caption else 0.0,
                 _repetition_penalty(caption), 0.0, -1.0,
-                "atomic-entailment-v2",
+                "atomic-entailment-v3-aligned-contradiction",
             )
 
         pairs = [(fact.matching_text, claim) for claim in claims for fact in facts]
@@ -211,7 +211,15 @@ class EntailmentExplanationJudge:
         aligned_by_fact = {fact_index: score for _, fact_index, score in aligned}
         recall = sum(fact.weight * aligned_by_fact.get(fact_index, 0.0) for fact_index, fact in enumerate(facts)) / total_weight
         graph_f1 = self._weighted_f1(precision, recall)
-        contradiction = sum(max(row, default=0.0) for row in contradiction_matrix) / len(claims)
+        # Penalize contradiction only inside the same one-to-one semantic
+        # alignment used for coverage/precision.  Object, onset and offset
+        # facts can legitimately describe different states (for example,
+        # "deformed" versus "returns to normal"); comparing every claim with
+        # every phase and taking the maximum would punish a correct offset.
+        contradiction = sum(
+            contradiction_matrix[claim_index][fact_index]
+            for claim_index, fact_index, _ in aligned
+        ) / len(claims)
 
         repetition = _repetition_penalty(caption)
         word_count = len(_WORD_RE.findall(caption))
@@ -231,7 +239,7 @@ class EntailmentExplanationJudge:
             repetition_penalty=repetition,
             length_penalty=length,
             reward=reward,
-            judge_id="atomic-entailment-v2",
+            judge_id="atomic-entailment-v3-aligned-contradiction",
         )
 
 

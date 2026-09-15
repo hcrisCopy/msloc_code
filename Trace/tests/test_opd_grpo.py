@@ -23,6 +23,7 @@ def load_module(name, relative):
 opd = load_module("opd_grpo_test", "trace/opd_grpo.py")
 replay = load_module("replay_test", "scripts/build_opd_grpo_replay.py")
 text_reward = load_module("text_reward_test", "trace/text_explanation_reward.py")
+rollout_audit = load_module("rollout_audit_test", "trace/rollout_audit.py")
 launcher = load_module("run_opd_grpo_test", "run_opd_grpo.py")
 
 
@@ -36,6 +37,23 @@ class OpdGrpoTests(unittest.TestCase):
 
     def time_ids(self, text):
         return [self.spec.time_start_id + self.spec.time_vocab[ch] for ch in text]
+
+    def test_rollout_audit_resumes_without_duplicates_and_repairs_partial_tail(self):
+        with tempfile.TemporaryDirectory() as root:
+            writer = rollout_audit.RolloutAuditWriter(root, "grpo", rank=3, enabled=True)
+            first = {"audit_key": "step0-sample-a-rollout0", "reward": {"total": 1.0}}
+            self.assertEqual(writer.write([first]), 1)
+            self.assertEqual(writer.write([first]), 0)
+            with writer.path.open("a", encoding="utf-8") as handle:
+                handle.write('{"audit_key":"incomplete"')
+
+            resumed = rollout_audit.RolloutAuditWriter(root, "grpo", rank=3, enabled=True)
+            second = {"audit_key": "step1-sample-b-rollout0", "reward": {"total": 0.5}}
+            self.assertEqual(resumed.write([first, second]), 1)
+            records = [json.loads(line) for line in resumed.path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([record["audit_key"] for record in records], [
+                "step0-sample-a-rollout0", "step1-sample-b-rollout0",
+            ])
 
     def test_valid_event_and_rewards(self):
         # <sync> 0000.2 <sep> 0003.4 <time-sync> <score-sync> caption
@@ -194,6 +212,34 @@ class OpdGrpoTests(unittest.TestCase):
         self.assertEqual([fact.relation for fact in facts], ["object_anomaly", "onset", "offset"])
         self.assertEqual([fact.weight for fact in facts], [2.0, 1.0, 1.0])
 
+    def test_text_reward_does_not_cross_penalize_different_phases(self):
+        evidence = opd.EvidenceCard(
+            object_caption="The hand is deformed during the forged interval.",
+            end_caption="The hand returns to normal at the end.",
+        )
+
+        class PhaseAwareNLI:
+            def probabilities(self, pairs):
+                results = []
+                for fact, claim in pairs:
+                    same_phase = (
+                        ("deformed" in fact.lower() and "deformed" in claim.lower())
+                        or ("returns to normal" in fact.lower() and "returns to normal" in claim.lower())
+                    )
+                    results.append((0.95, 0.01) if same_phase else (0.01, 0.99))
+                return results
+
+        judge = text_reward.EntailmentExplanationJudge.__new__(text_reward.EntailmentExplanationJudge)
+        judge.max_words = 80
+        judge.require_candidate_observable = False
+        judge.nli = PhaseAwareNLI()
+        verdict = judge.score(
+            caption="The hand is deformed. The hand returns to normal.",
+            evidence=evidence,
+        )
+        self.assertAlmostEqual(verdict.contradiction, 0.01)
+        self.assertEqual(verdict.judge_id, "atomic-entailment-v3-aligned-contradiction")
+
     def test_candidate_sft_aliases_use_paper_architecture_without_pairing(self):
         common = [
             "--devices", "0", "--nproc-per-node", "1",
@@ -224,6 +270,17 @@ class OpdGrpoTests(unittest.TestCase):
             "--training-samples", "samples.json", "--base-model", "trace-uni",
         ])
         self.assertIs(paired.handler, launcher.run_paired_teacher_sft)
+
+        teacher_eval = parser.parse_args([
+            "test-teacher",
+            "--devices", "0", "--nproc-per-node", "1",
+            "--test-samples", "test_paired.json", "--video-root", "videos",
+            "--teacher-model", "teacher_sft", "--vision-tower", "clip",
+            "--annotation", "test.json", "--output", "teacher_eval",
+            "--metrics-output", "teacher_eval/metrics.json", "--prompt-file", "dvc.txt",
+        ])
+        self.assertIs(teacher_eval.handler, launcher.run_teacher_eval)
+        self.assertFalse(hasattr(teacher_eval, "student_checkpoint"))
 
     def test_external_student_without_manifest_is_allowed_with_warning(self):
         with tempfile.TemporaryDirectory() as root:

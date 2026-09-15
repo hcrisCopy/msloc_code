@@ -34,6 +34,7 @@ from .opd_grpo import (
     score_trace_output,
     temporal_iou,
 )
+from .rollout_audit import RolloutAuditWriter
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -386,6 +387,35 @@ class TraceGRPOTrainer(TraceTrainer):
         self.reference_model.requires_grad_(False)
         self.explanation_judge = explanation_judge
         self._grpo_metrics = {}
+        if self.args.save_rollouts and not self.args.rollout_audit_dir:
+            raise ValueError("--save_rollouts True requires --rollout_audit_dir")
+        self.rollout_audit = RolloutAuditWriter(
+            self.args.rollout_audit_dir or self.args.output_dir,
+            stage=self.args.second_stage,
+            rank=self.args.process_index,
+            enabled=self.args.save_rollouts,
+        )
+
+    def _audit_key(self, sample_id, rollout_index):
+        return (
+            f"{self.args.second_stage}:rank{self.args.process_index}:"
+            f"step{self.state.global_step}:{sample_id}:rollout{rollout_index}"
+        )
+
+    def _audit_common(self, target, rollout_index):
+        return {
+            "audit_key": self._audit_key(target["id"], rollout_index),
+            "stage": self.args.second_stage,
+            "rank": int(self.args.process_index),
+            "global_step": int(self.state.global_step),
+            "epoch": None if self.state.epoch is None else float(self.state.epoch),
+            "sample_id": target["id"],
+            "candidate_video": target.get("candidate_video"),
+            "proposal": target.get("proposal"),
+            "target_segments": target.get("target_segments", []),
+            "is_positive": bool(target.get("is_positive", False)),
+            "rollout_index": int(rollout_index),
+        }
 
     def _token_spec(self, model):
         unwrapped = _unwrap_trace_model(model)
@@ -580,7 +610,7 @@ class TraceGRPOTrainer(TraceTrainer):
         )
         target_segments = [tuple(segment) for segment in target.get("target_segments", [])]
         evidence_items = target.get("evidence", [])
-        parsed, rewards = [], []
+        parsed, rewards, matched_evidence = [], [], []
         for rollout_index, response in enumerate(responses):
             parsed_output = parse_trace_tokens(
                 response, spec,
@@ -589,6 +619,7 @@ class TraceGRPOTrainer(TraceTrainer):
             )
             parsed.append(parsed_output)
             evidence = self._matched_evidence(parsed_output, target_segments, evidence_items)
+            matched_evidence.append(evidence)
             rewards.append(score_trace_output(
                 parsed_output,
                 target_segments=target_segments,
@@ -600,6 +631,22 @@ class TraceGRPOTrainer(TraceTrainer):
                 explanation_judge=self.explanation_judge,
             ))
         advantages = component_advantages(rewards)
+        audit_records = []
+        for rollout_index, (response, parsed_output, reward, evidence) in enumerate(
+                zip(responses, parsed, rewards, matched_evidence)):
+            record = self._audit_common(target, rollout_index)
+            record.update({
+                "response_token_ids": [int(token) for token in response],
+                "parsed_output": parsed_output.as_dict(),
+                "matched_evidence": evidence.as_dict() if evidence is not None else None,
+                "reward": reward.as_dict(),
+                "advantages": {
+                    component: None if values is None else float(values[rollout_index])
+                    for component, values in advantages.items()
+                },
+            })
+            audit_records.append(record)
+        self.rollout_audit.write(audit_records)
         reference = self._reference_on_actor_device(model)
         terms, kls = [], []
         for rollout_index, (response, rollout) in enumerate(zip(responses, parsed)):
@@ -890,6 +937,17 @@ class TraceOPDTrainer(TraceGRPOTrainer):
             # replacement that can hide whether the student actually failed.
             response = self._rollout(model, prompt, videos[row], modals[row], timestamps[row])
             if not response:
+                record = self._audit_common(target, 0)
+                record.update({
+                    "response_token_ids": [],
+                    "parsed_output": {
+                        "status": "empty_rollout", "segments": [], "caption": "",
+                        "failure_reasons": ["empty_generation"], "raw_token_ids": [],
+                    },
+                    "teacher_precheck": target.get("teacher_cache"),
+                    "opd": {"used_for_loss": False, "reason": "empty_generation"},
+                })
+                self.rollout_audit.write([record])
                 continue
             disagreement_weight, disagreement_kind = self._disagreement_weight(response, target, spec)
             # The deployment-policy rollout determines both the disagreement
@@ -915,11 +973,17 @@ class TraceOPDTrainer(TraceGRPOTrainer):
                 disagreement_weight * torch.stack(original_terms).mean()
                 if original_terms else None
             )
+            original_reverse_kl = (
+                float(torch.stack(original_terms).mean().detach().cpu())
+                if original_terms else None
+            )
             disagreement_counts[disagreement_kind] = disagreement_counts.get(disagreement_kind, 0) + 1
 
             recoverable_failure = disagreement_kind in {
                 "false_refusal", "positive_format_error", "positive_localization_error",
             }
+            guided_response = None
+            guided_reverse_kl = None
             if (recoverable_failure
                     and random.random() < self.args.opd_guided_positive_fraction):
                 guided_response = self._guided_rollout(
@@ -945,12 +1009,45 @@ class TraceOPDTrainer(TraceGRPOTrainer):
                             guided_terms.append(reverse_kl)
                     structural_token_count += len(guided_terms)
                     if guided_terms:
+                        guided_reverse_kl = float(torch.stack(guided_terms).mean().detach().cpu())
                         guided_loss = (
                             self.args.opd_guided_loss_coef
                             * disagreement_weight
                             * torch.stack(guided_terms).mean()
                         )
                         trajectory_loss = guided_loss if trajectory_loss is None else trajectory_loss + guided_loss
+            parsed_output = parse_trace_tokens(
+                response,
+                spec,
+                self.tokenizer.decode,
+                window_duration=max(0.0, float(target["proposal"][1]) - float(target["proposal"][0])),
+            )
+            guided_parsed_output = None
+            if guided_response:
+                guided_parsed_output = parse_trace_tokens(
+                    guided_response,
+                    spec,
+                    self.tokenizer.decode,
+                    window_duration=max(0.0, float(target["proposal"][1]) - float(target["proposal"][0])),
+                ).as_dict()
+            record = self._audit_common(target, 0)
+            record.update({
+                "response_token_ids": [int(token) for token in response],
+                "parsed_output": parsed_output.as_dict(),
+                "guided_response_token_ids": (
+                    [int(token) for token in guided_response] if guided_response is not None else None
+                ),
+                "guided_parsed_output": guided_parsed_output,
+                "teacher_precheck": target.get("teacher_cache"),
+                "opd": {
+                    "used_for_loss": trajectory_loss is not None,
+                    "disagreement_kind": disagreement_kind,
+                    "disagreement_weight": float(disagreement_weight),
+                    "student_teacher_reverse_kl": original_reverse_kl,
+                    "guided_student_teacher_reverse_kl": guided_reverse_kl,
+                },
+            })
+            self.rollout_audit.write([record])
             if trajectory_loss is not None:
                 distillation_terms.append(trajectory_loss)
         opd_loss = torch.stack(distillation_terms).mean() if distillation_terms else sft_loss * 0.0

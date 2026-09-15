@@ -202,6 +202,15 @@ def _common_train_args(args, model_path: str, output: str) -> List[str]:
     ]
 
 
+def _rollout_audit_args(args) -> List[str]:
+    if args.save_rollouts == "True" and not args.rollout_output:
+        raise ValueError("--save-rollouts true requires --rollout-output")
+    result = ["--save_rollouts", args.save_rollouts]
+    if args.rollout_output:
+        result += ["--rollout_audit_dir", args.rollout_output]
+    return result
+
+
 def _write_stage_manifest(args, stage: str, extra: dict) -> None:
     if int(os.environ.get("RANK", "0")) != 0:
         return
@@ -344,6 +353,7 @@ def run_opd(args) -> None:
         "--opd_guided_max_tokens", str(args.guided_max_tokens),
         "--opd_guided_loss_coef", str(args.guided_loss_coef),
         "--grpo_max_new_tokens", str(args.rollout_max_new_tokens),
+        *_rollout_audit_args(args),
     ]
     _torchrun(args, TRACE_ROOT / "trace" / "train_mt.py", train_args)
     _write_stage_manifest(args, "opd_student", {
@@ -355,6 +365,8 @@ def run_opd(args) -> None:
         "teacher_input_mode": "upper_real_lower_candidate",
         "mm_projector_type": args.mm_projector_type,
         "closs": args.closs == "True",
+        "save_rollouts": args.save_rollouts == "True",
+        "rollout_output": args.rollout_output,
     })
 
 
@@ -375,6 +387,7 @@ def run_grpo(args) -> None:
         "--grpo_text_require_candidate_observable", args.require_candidate_observable,
         "--grpo_structure_aware", args.structure_aware,
         "--grpo_kl_coef", str(args.kl_coef), "--grpo_sft_coef", str(args.sft_coef),
+        *_rollout_audit_args(args),
     ]
     if args.explanation_weight > 0 and not args.entailment_model_path:
         raise ValueError("--entailment-model-path is required when --explanation-weight is positive")
@@ -386,10 +399,12 @@ def run_grpo(args) -> None:
     _torchrun(args, TRACE_ROOT / "trace" / "train_mt.py", train_args)
     _write_stage_manifest(args, "grpo", {
         "opd_checkpoint": args.opd_checkpoint, "replay": args.replay,
-        "input_mode": "candidate_only", "text_reward_mode": "atomic_entailment_v2",
+        "input_mode": "candidate_only", "text_reward_mode": "atomic_entailment_v3_aligned_contradiction",
         "entailment_model_path": args.entailment_model_path,
         "mm_projector_type": args.mm_projector_type,
         "closs": args.closs == "True",
+        "save_rollouts": args.save_rollouts == "True",
+        "rollout_output": args.rollout_output,
     })
 
 
@@ -443,6 +458,53 @@ def run_precheck(args) -> None:
             raise ValueError("Precheck accepts --resume auto (its progress location is fixed beside --output)")
         script_args.append("--resume")
     _torchrun(args, TRACE_ROOT / "scripts" / "precheck_opd_teacher.py", script_args)
+
+
+def run_teacher_eval(args) -> None:
+    if not Path(args.teacher_checkpoint).is_dir():
+        raise FileNotFoundError(f"Teacher checkpoint directory does not exist: {args.teacher_checkpoint}")
+    if args.clean and args.resume != "none":
+        raise ValueError("--clean and --resume cannot be used together")
+    output_dir = Path(args.output)
+    if args.clean:
+        _safe_clean_dir(args.output)
+        _safe_clean_file(args.metrics_output)
+    elif output_dir.exists() and args.resume == "none":
+        raise FileExistsError(f"{args.output} already exists; choose --clean or --resume auto")
+    elif not output_dir.exists() and args.resume != "none":
+        raise FileNotFoundError(f"Cannot resume missing Teacher evaluation directory: {args.output}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "proposal_report.json"
+    prediction_path = output_dir / "paired_test_predictions.json"
+    subset_gt_path = output_dir / "paired_test_gt.json"
+    script_args = [
+        "--teacher-only",
+        "--replay", args.replay, "--data-folder", args.video_root,
+        "--model-path", args.teacher_checkpoint, "--vision-tower", args.vision_tower,
+        "--annotation", args.annotation,
+        "--output", str(report_path),
+        "--prediction-output", str(prediction_path),
+        "--subset-gt-output", str(subset_gt_path),
+        "--prompt-file", args.prompt_file, "--version", args.version,
+        "--bnd-ratio", str(args.bnd_ratio), "--bnd-frames", str(args.bnd_frames),
+        "--seg-frames", str(args.seg_frames), "--max-new-tokens", str(args.max_new_tokens),
+        "--teacher-iou-gate", str(args.teacher_iou_gate),
+        "--max-samples", str(args.max_samples),
+    ]
+    if args.resume != "none":
+        if args.resume != "auto":
+            raise ValueError("Teacher evaluation accepts --resume auto (progress is stored beside --output)")
+        script_args.append("--resume")
+    _torchrun(args, TRACE_ROOT / "scripts" / "precheck_opd_teacher.py", script_args)
+    metrics_command = [
+        sys.executable, str(WORKSPACE_ROOT / "evaluate_long.py"),
+        "--gt_file", str(subset_gt_path),
+        "--infer_file", str(prediction_path),
+        "--output_file", args.metrics_output,
+    ]
+    if args.resume != "none":
+        metrics_command.append("--reuse-existing")
+    _run(metrics_command)
 
 
 def _terminate_processes(processes: Iterable[subprocess.Popen]) -> None:
@@ -666,6 +728,30 @@ def build_parser() -> argparse.ArgumentParser:
     precheck.add_argument("--clean", action="store_true")
     precheck.set_defaults(handler=run_precheck)
 
+    teacher_eval = subparsers.add_parser(
+        "test-teacher",
+        help="Evaluate only the paired-input Teacher SFT checkpoint",
+    )
+    add_distributed(teacher_eval)
+    teacher_eval.add_argument("--test-samples", "--replay", dest="replay", required=True)
+    teacher_eval.add_argument("--annotation", required=True)
+    teacher_eval.add_argument("--video-root", required=True)
+    teacher_eval.add_argument("--teacher-model", "--teacher-checkpoint", dest="teacher_checkpoint", required=True)
+    teacher_eval.add_argument("--vision-tower", required=True)
+    teacher_eval.add_argument("--output", required=True)
+    teacher_eval.add_argument("--metrics-output", required=True)
+    teacher_eval.add_argument("--prompt-file", required=True)
+    teacher_eval.add_argument("--version", default="v1_mistral")
+    teacher_eval.add_argument("--bnd-ratio", type=float, default=0.2)
+    teacher_eval.add_argument("--bnd-frames", type=int, default=16)
+    teacher_eval.add_argument("--seg-frames", type=int, default=8)
+    teacher_eval.add_argument("--max-new-tokens", type=int, default=128)
+    teacher_eval.add_argument("--teacher-iou-gate", type=float, default=0.3)
+    teacher_eval.add_argument("--max-samples", type=int, default=0)
+    teacher_eval.add_argument("--resume", default="none", choices=("none", "auto"))
+    teacher_eval.add_argument("--clean", action="store_true")
+    teacher_eval.set_defaults(handler=run_teacher_eval)
+
     teacher = subparsers.add_parser(
         "train-paired-teacher", aliases=["paired-teacher-sft"],
         help="Train the fallback teacher on upper-real/lower-candidate inputs",
@@ -694,6 +780,8 @@ def build_parser() -> argparse.ArgumentParser:
     opd.add_argument("--guided-max-tokens", type=int, default=16)
     opd.add_argument("--guided-loss-coef", type=float, default=0.25)
     opd.add_argument("--rollout-max-new-tokens", type=int, default=128)
+    opd.add_argument("--save-rollouts", type=_bool, default="False")
+    opd.add_argument("--rollout-output", default="")
     opd.set_defaults(handler=run_opd)
 
     grpo = subparsers.add_parser("grpo", help="Candidate-only structure-aware GRPO")
@@ -717,6 +805,8 @@ def build_parser() -> argparse.ArgumentParser:
     grpo.add_argument("--structure-aware", type=_bool, default="True")
     grpo.add_argument("--kl-coef", type=float, default=0.02)
     grpo.add_argument("--sft-coef", type=float, default=0.1)
+    grpo.add_argument("--save-rollouts", type=_bool, default="False")
+    grpo.add_argument("--rollout-output", default="")
     grpo.set_defaults(handler=run_grpo)
 
     evaluate = subparsers.add_parser(

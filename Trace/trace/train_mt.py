@@ -226,6 +226,8 @@ class TrainingArguments(transformers.TrainingArguments):
     grpo_text_nli_batch_size: int = field(default=32)
     grpo_text_max_words: int = field(default=80)
     grpo_text_require_candidate_observable: bool = field(default=False)
+    save_rollouts: bool = field(default=False, metadata={"help": "Persist every OPD/GRPO rollout as per-rank JSONL."})
+    rollout_audit_dir: Optional[str] = field(default=None, metadata={"help": "Directory for per-rank OPD/GRPO rollout JSONL files."})
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
