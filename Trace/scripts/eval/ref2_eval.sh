@@ -30,7 +30,7 @@ SPLIT='test'
 # Proposal JSON for inference
 TEST_ANNO_FILE=${TEST_ANNO_FILE:?Set TEST_ANNO_FILE to DeMamba predictions.json generated on the test split}
 
-RAW_ANNO_FILE=${RAW_ANNO_FILE:-"$DATA_ROOT/annos/test_all_1209.json"}
+RAW_ANNO_FILE=${RAW_ANNO_FILE:-"$DATA_ROOT/annos/test_all_1209_0119.json"}
 
 VIDEO_DIR=${VIDEO_DIR:-"$DATA_ROOT/videos"}
 PROMPT_FILE="${DIR}/trace/prompts/dvc.txt"

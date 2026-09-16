@@ -28,7 +28,7 @@ SPLIT='test'
 # Proposal JSON for inference (DeMamba 4-class predictions on test set)
 TEST_ANNO_FILE=${TEST_ANNO_FILE:-"$MSLOC_ASSETS/DeMamba/results/all_Class_4/eval/predictions.json"}
 
-RAW_ANNO_FILE=${RAW_ANNO_FILE:-"$DATA_ROOT/annos/test_all_1209.json"}
+RAW_ANNO_FILE=${RAW_ANNO_FILE:-"$DATA_ROOT/annos/test_all_1209_0119.json"}
 
 VIDEO_DIR=${VIDEO_DIR:-"$DATA_ROOT/videos"}
 PROMPT_FILE="${DIR}/trace/prompts/dvc.txt"

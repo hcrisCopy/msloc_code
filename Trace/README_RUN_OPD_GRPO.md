@@ -32,7 +32,7 @@ hf download cross-encoder/nli-deberta-v3-small \
 ../MSLoc_data/DeMamba/full/method/eval/predictions.json
 ```
 
-两份文件分别对应 `train_all_1209.json` 和 `test_all_1209.json`，也是第二阶段从第一阶段接收的产物。
+两份文件分别对应 `train_all_1209.json` 和 `test_all_1209_0119.json`，也是第二阶段从第一阶段接收的产物。测试 proposal 是第一阶段按 `_0119` 版测试标注生成的，因此第二阶段构建测试样本和三次 Student 测试都必须继续使用同一版 GT。
 
 - 首次运行用 `--clean`；恢复时删除 `--clean`。
 - 训练恢复：把 `--resume none` 改为 `--resume auto`，也可传具体 checkpoint。
@@ -111,7 +111,7 @@ python Trace/run_opd_grpo.py test \
   --devices 0,1,2,3,4,5,6,7 \
   --model ../MSLoc_data/Trace/experiments/opd_grpo/student_sft \
   --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
-  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
   --output ../MSLoc_data/Trace/inference_results/student_sft_test \
@@ -152,7 +152,7 @@ python Trace/run_opd_grpo.py build-samples \
   --clean
 
 python Trace/run_opd_grpo.py build-samples \
-  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
   --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --output ../MSLoc_data/Trace/experiments/opd_grpo/test_paired_samples.json \
@@ -246,7 +246,7 @@ python Trace/run_opd_grpo.py test-teacher \
   --devices 0,1,2,3,4,5,6,7 \
   --nproc-per-node 8 \
   --test-samples ../MSLoc_data/Trace/experiments/opd_grpo/test_paired_samples.json \
-  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --teacher-model ../MSLoc_data/Trace/experiments/opd_grpo/teacher_sft \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
@@ -386,7 +386,7 @@ python Trace/run_opd_grpo.py test \
   --devices 0,1,2,3,4,5,6,7 \
   --model ../MSLoc_data/Trace/experiments/opd_grpo/opd \
   --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
-  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
   --output ../MSLoc_data/Trace/inference_results/opd_test \
@@ -500,7 +500,7 @@ python Trace/run_opd_grpo.py test \
   --devices 0,1,2,3,4,5,6,7 \
   --model ../MSLoc_data/Trace/experiments/opd_grpo/grpo \
   --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
-  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --vision-tower ../MSLoc_data/Trace/ckpts/clip-vit-large-patch14-336 \
   --output ../MSLoc_data/Trace/inference_results/grpo_test \
