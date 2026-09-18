@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+(?:[-'][a-z0-9]+)?", re.IGNORECASE)
-_CLAUSE_RE = re.compile(r"[.!?;]+|\b(?:while|whereas|however)\b", re.IGNORECASE)
+_CLAUSE_RE = re.compile(r"[.!?;]+|\b(?:whereas|however)\b", re.IGNORECASE)
 def _tokens(text: str) -> List[str]:
     return _WORD_RE.findall(str(text).lower())
 
