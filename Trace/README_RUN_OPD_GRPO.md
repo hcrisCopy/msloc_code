@@ -410,7 +410,7 @@ GRPO 从第 7 步 OPD 权重继续训练，读取第 3 步的全部训练 propos
 
 - 定位奖励：负 proposal 正确回答 `No forgery.` 得正分；正 proposal 必须输出 fake 片段，再按片段 IoU 和起止边界准确度得分，多报片段会扣分。
 - 格式奖励：回答能被严格解析为合法 TRACE 事件或 `No forgery.` 得 `+1`，格式错误得 `-1`。
-- 解释奖励：从训练标注中读取与 SFT 相同的解释事实：`obj_cot[0]` 是主要异常，非 Round4 再加入 `bnd_cot_st[0]` 和 `bnd_cot_ed[0]` 作为开始、结束事实。生成解释先按句子拆成若干 claim，冻结的 entailment 模型计算每条 claim 对每条事实的“支持”和“矛盾”概率，再按支持概率做一对一匹配；一条生成句子最多解释一条事实，一条事实也只能被覆盖一次。事实覆盖越完整、生成句子中有标注依据的比例越高，奖励越高。矛盾只检查一对一匹配后的对应事实，例如结束句只与匹配到的结束事实判断，不再因为它和主要异常描述的是不同阶段而误扣分；重复表达和超过 80 词仍会扣分。为避免边界没找准却靠复述标注得分，只对正样本且定位 IoU 不低于 `0.3` 的回答计算解释奖励。
+- 解释奖励：从训练标注中读取与 SFT 相同的解释事实：`obj_cot[0]` 是主要异常，非 Round4 再加入 `bnd_cot_st[0]` 和 `bnd_cot_ed[0]` 作为开始、结束事实。生成解释先按句子拆成若干 claim，冻结的 entailment 模型计算每条 claim 对每条事实的“支持”和“矛盾”概率，再按支持概率做一对一匹配；一条生成句子最多解释一条事实，一条事实也只能被覆盖一次。事实覆盖越完整、生成句子中有标注依据的比例越高，奖励越高。矛盾只检查一对一匹配后的对应事实，例如结束句只与匹配到的结束事实判断，不再因为它和主要异常描述的是不同阶段而误扣分。为避免边界没找准却靠复述标注得分，只对正样本且定位 IoU 不低于 `0.3` 的回答计算解释奖励。
 
 总奖励是三项的加权和，正式命令中的权重依次为 `1.0`、`0.1` 和 `0.3`（定位、格式、解释）。
 
@@ -474,8 +474,6 @@ python Trace/run_opd_grpo.py grpo \
   --format-weight 0.1 \
   --explanation-iou-gate 0.3 \
   --boundary-tolerance 1.0 \
-  --text-max-words 80 \
-  --require-candidate-observable false \
   --entailment-model-path ../MSLoc_data/Trace/ckpts/nli-deberta-v3-small \
   --entailment-device cuda \
   --entailment-batch-size 32 \

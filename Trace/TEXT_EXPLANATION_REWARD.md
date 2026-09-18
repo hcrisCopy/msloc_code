@@ -15,7 +15,7 @@ reward = 0.55 * coverage + 0.45 * precision
          - 0.50 * contradiction
 ```
 
-奖励裁剪到 `[-1, 1]`。它只在正 proposal 的定位 IoU 达到门槛后开启；负 proposal 只应输出规范 no-event。正式实验与 SFT 一样使用人工解释标注，因此传入 `--require-candidate-observable false`；若以后补充逐样本可观察性审计，可将其改为 true。
+奖励裁剪到 `[-1, 1]`。它只在正 proposal 的定位 IoU 达到门槛后开启；负 proposal 只应输出规范 no-event。正式实验与 SFT 一样使用人工解释标注，因此不传 `--require-candidate-observable`（默认关闭）；若以后补充逐样本可观察性审计，可显式加上该开关。
 
 ## 边界
 
