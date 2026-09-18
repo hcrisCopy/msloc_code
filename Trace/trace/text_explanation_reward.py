@@ -31,16 +31,6 @@ def _split_claims(text: str) -> List[str]:
     return claims or ([str(text).strip()] if str(text).strip() else [])
 
 
-def _repetition_penalty(text: str) -> float:
-    tokens = _tokens(text)
-    if len(tokens) < 6:
-        return 0.0
-    bigrams = list(zip(tokens, tokens[1:]))
-    if not bigrams:
-        return 0.0
-    return max(0.0, 1.0 - len(set(bigrams)) / len(bigrams))
-
-
 def _maximum_weight_matching(matrix: Sequence[Sequence[float]]) -> List[Tuple[int, int, float]]:
     """Exact claim/fact assignment by dynamic programming over fact masks.
 
@@ -106,8 +96,6 @@ class TextExplanationVerdict:
     graph_f1: float
     contradiction: float
     generic_penalty: float
-    repetition_penalty: float
-    length_penalty: float
     reward: float
     judge_id: str
 
@@ -165,10 +153,8 @@ class EntailmentExplanationJudge:
         nli_model_path: str,
         nli_device: str = "cpu",
         nli_batch_size: int = 32,
-        max_words: int = 80,
         require_candidate_observable: bool = False,
     ):
-        self.max_words = max(8, int(max_words))
         self.require_candidate_observable = bool(require_candidate_observable)
         self.nli = FrozenNLIScorer(nli_model_path, nli_device, nli_batch_size)
 
@@ -185,8 +171,7 @@ class EntailmentExplanationJudge:
         if not facts or not claims:
             return TextExplanationVerdict(
                 0.0, 0.0, 0.0, 0.0, 1.0 if caption else 0.0,
-                _repetition_penalty(caption), 0.0, -1.0,
-                "atomic-entailment-v3-aligned-contradiction",
+                -1.0, "atomic-entailment-v3-aligned-contradiction",
             )
 
         pairs = [(fact.matching_text, claim) for claim in claims for fact in facts]
@@ -221,14 +206,7 @@ class EntailmentExplanationJudge:
             for claim_index, fact_index, _ in aligned
         ) / len(claims)
 
-        repetition = _repetition_penalty(caption)
-        word_count = len(_WORD_RE.findall(caption))
-        length = min(1.0, max(0, word_count - self.max_words) / self.max_words)
-        reward = (
-            0.55 * recall + 0.45 * precision
-            - 0.50 * contradiction
-            - 0.10 * repetition - 0.10 * length
-        )
+        reward = 0.55 * recall + 0.45 * precision - 0.50 * contradiction
         reward = max(-1.0, min(1.0, reward))
         return TextExplanationVerdict(
             graph_precision=precision,
@@ -236,8 +214,6 @@ class EntailmentExplanationJudge:
             graph_f1=graph_f1,
             contradiction=contradiction,
             generic_penalty=0.0,
-            repetition_penalty=repetition,
-            length_penalty=length,
             reward=reward,
             judge_id="atomic-entailment-v3-aligned-contradiction",
         )

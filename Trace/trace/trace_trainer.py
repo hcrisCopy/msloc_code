@@ -698,7 +698,7 @@ class TraceGRPOTrainer(TraceTrainer):
         }
         detail_keys = (
             "graph_precision", "graph_recall", "graph_f1", "contradiction",
-            "generic_penalty", "repetition_penalty", "length_penalty",
+            "generic_penalty",
         )
         details = [reward.explanation_details for reward in rewards if reward.explanation_details]
         for key in detail_keys:

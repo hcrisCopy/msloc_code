@@ -190,7 +190,6 @@ class OpdGrpoTests(unittest.TestCase):
                 return results
 
         judge = text_reward.EntailmentExplanationJudge.__new__(text_reward.EntailmentExplanationJudge)
-        judge.max_words = 80
         judge.require_candidate_observable = False
         judge.nli = FakeNLI()
         matched = judge.score(caption="The mouth flickers with unnatural shape changes.", evidence=evidence)
@@ -230,7 +229,6 @@ class OpdGrpoTests(unittest.TestCase):
                 return results
 
         judge = text_reward.EntailmentExplanationJudge.__new__(text_reward.EntailmentExplanationJudge)
-        judge.max_words = 80
         judge.require_candidate_observable = False
         judge.nli = PhaseAwareNLI()
         verdict = judge.score(

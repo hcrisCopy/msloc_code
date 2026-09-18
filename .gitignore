@@ -14,3 +14,4 @@ __pycache__/
 /Trace/inference_results/
 /Trace/checkpoints/
 tmp/
+.workbuddy/

@@ -383,7 +383,6 @@ def run_grpo(args) -> None:
         "--grpo_explanation_iou_gate", str(args.explanation_iou_gate),
         "--grpo_boundary_tolerance", str(args.boundary_tolerance),
         "--grpo_text_reward_mode", "entailment",
-        "--grpo_text_max_words", str(args.text_max_words),
         "--grpo_text_require_candidate_observable", args.require_candidate_observable,
         "--grpo_structure_aware", args.structure_aware,
         "--grpo_kl_coef", str(args.kl_coef), "--grpo_sft_coef", str(args.sft_coef),
@@ -797,8 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
     grpo.add_argument("--format-weight", type=float, default=0.1)
     grpo.add_argument("--explanation-iou-gate", type=float, default=0.3)
     grpo.add_argument("--boundary-tolerance", type=float, default=1.0)
-    grpo.add_argument("--text-max-words", type=int, default=80)
-    grpo.add_argument("--require-candidate-observable", type=_bool, default="False")
+    grpo.add_argument("--require-candidate-observable", action="store_true", default=False)
     grpo.add_argument("--entailment-model-path", default="")
     grpo.add_argument("--entailment-device", default="cuda")
     grpo.add_argument("--entailment-batch-size", type=int, default=32)

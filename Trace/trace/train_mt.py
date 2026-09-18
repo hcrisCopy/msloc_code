@@ -224,7 +224,6 @@ class TrainingArguments(transformers.TrainingArguments):
     grpo_text_nli_model_path: Optional[str] = field(default=None, metadata={"help": "Local frozen entailment model used for atomic explanation scoring."})
     grpo_text_nli_device: str = field(default="cpu")
     grpo_text_nli_batch_size: int = field(default=32)
-    grpo_text_max_words: int = field(default=80)
     grpo_text_require_candidate_observable: bool = field(default=False)
     save_rollouts: bool = field(default=False, metadata={"help": "Persist every OPD/GRPO rollout as per-rank JSONL."})
     rollout_audit_dir: Optional[str] = field(default=None, metadata={"help": "Directory for per-rank OPD/GRPO rollout JSONL files."})
@@ -2364,7 +2363,6 @@ def train(attn_implementation="eager"):
                 nli_model_path=training_args.grpo_text_nli_model_path,
                 nli_device=training_args.grpo_text_nli_device,
                 nli_batch_size=training_args.grpo_text_nli_batch_size,
-                max_words=training_args.grpo_text_max_words,
                 require_candidate_observable=training_args.grpo_text_require_candidate_observable,
             )
         trainer = TraceGRPOTrainer(
