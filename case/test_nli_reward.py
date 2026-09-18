@@ -16,8 +16,8 @@ NLI 文字解释奖励 —— 真实推理版演示脚本
     - recall   ：Σ(事实权重 × 匹配 entailment) ÷ Σ 权重（object=2, onset=1, offset=1）
     - contradiction：已匹配对的 contradiction 求和 ÷ claim 总数
 
-推理链路严格照搬仓库 `Trace/trace/eval/evaluate_ref.py`：
-    load_pretrained_model → process_video_ref_split 抽帧 → generate → parse_trace_tokens 解析 caption。
+推理链路照搬仓库 `Trace/trace/eval/evaluate_ref.py`：
+    加载模型（覆盖 config 里遗留的 vision_tower 路径）→ process_video_ref_split 抽帧 → generate → parse_trace_tokens 解析 caption。
 
 运行（远程服务器，在 msloc_code 根目录；GPU + trace-uni 权重 + 视频 + NLI 模型）：
     python case/test_nli_reward.py \
@@ -92,6 +92,48 @@ def safe_decode_text(tokenizer, token_ids):
 def read_txt(path):
     with open(path, "r", encoding="utf-8") as fin:
         return fin.readline().strip()
+
+
+def load_trace_model(model_path: str, vision_tower_path: str, device):
+    """加载 TRACE 模型，并覆盖 config 里训练机遗留的 vision tower 路径。
+
+    仓库的 load_pretrained_model 会把 --vision-tower 塞进 **kwargs 后静默忽略
+    （TraceMistralForCausalLM.__init__(config, **kwargs) 不下传），实际读的是
+    config.json 里的 mm_vision_tower。这里照搬 train_mt.py 的 apply_runtime_model_config：
+    先 AutoConfig 读 config → 改 mm_vision_tower → from_pretrained(config=config)。
+    """
+    import torch
+    from transformers import AutoConfig, AutoTokenizer
+    from trace.model.language_model.trace_mistral import TraceMistralForCausalLM
+    from trace.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    config.mm_vision_tower = vision_tower_path
+    config.vision_tower = vision_tower_path
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    model = TraceMistralForCausalLM.from_pretrained(
+        model_path, config=config, low_cpu_mem_usage=True,
+        torch_dtype=torch.float16, device_map=None,
+    )
+    model = model.to(device)
+    model.to(dtype=torch.float16)
+
+    mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
+    mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
+    if mm_use_im_patch_token:
+        tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
+    if mm_use_im_start_end:
+        tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+    model.resize_token_embeddings(len(tokenizer))
+
+    vision_tower = model.get_vision_tower()
+    if not vision_tower.is_loaded:
+        vision_tower.load_model()
+    vision_tower.to(device=device, dtype=torch.float16)
+    processor = vision_tower.image_processor
+
+    return tokenizer, model, processor
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +315,6 @@ def main() -> None:
     parser.add_argument("--bnd-frames", type=int, default=16)
     parser.add_argument("--seg-frames", type=int, default=8)
     parser.add_argument("--bnd-ratio", type=float, default=0.2)
-    parser.add_argument("--closs", type=lambda x: str(x).lower() == "true", default=None, help="是否用 closs token，默认不传")
     parser.add_argument("--num-samples", type=int, default=3, help="推理前 N 个样例")
     args = parser.parse_args()
 
@@ -281,8 +322,7 @@ def main() -> None:
     import torch
     from trace.conversation import conv_templates
     from trace.constants import DEFAULT_MMODAL_TOKEN
-    from trace.mm_utils import get_model_name_from_path, tokenizer_MMODAL_token_all, process_video_ref_split
-    from trace.model.builder import load_pretrained_model
+    from trace.mm_utils import tokenizer_MMODAL_token_all, process_video_ref_split
 
     device = torch.device(args.device)
     nli_device = args.nli_device or args.device
@@ -297,16 +337,10 @@ def main() -> None:
             raise KeyError(f"标注里没有 {key}")
         picked.append((key, by_path[key]))
 
-    # ---- 加载模型 ----
-    model_name = get_model_name_from_path(str(args.model_path))
-    load_kwargs = {"vision_tower": str(args.vision_tower), "device_map": None}
-    if args.closs is not None:
-        load_kwargs["closs"] = args.closs
-    tokenizer, model, processor, context_len = load_pretrained_model(
-        str(args.model_path), None, model_name, **load_kwargs
-    )
-    model = model.to(device)
-    model.to(dtype=torch.float16)
+    # ---- 加载模型（覆盖 config 里训练机遗留的 vision tower 路径）----
+    model_path = str(args.model_path.resolve())
+    vision_tower_path = str(args.vision_tower.resolve())
+    tokenizer, model, processor = load_trace_model(model_path, vision_tower_path, device)
     trace_token_spec = TraceTokenSpec(
         text_vocab_size=model.vocab_size,
         time_vocab=model.get_model().time_tokenizer.vocab,
